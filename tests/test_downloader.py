@@ -108,7 +108,21 @@ class TestArchiver(unittest.TestCase):
         assert rel_path == "../kolibri_1.2.3.png"
 
     def test_pretextbook_css_fetch(self):
-        sushi_url = 'https://activecalculus.org/single2e/frontmatter.html'
-        archive = downloader.ArchiveDownloader("downloads/active_calc_2e_again_" + datetime.now().strftime("%Y-%m-%d_%H:%M:%S"))
+        sushi_url = "http://localhost:" + str(PORT) + "/samples/PreTeXt_book_test/activecalculus.org/single2e/sec-5-2-FTC2.html"
+        dest_dir = "active_calc_2e_again_" + datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+        archive = downloader.ArchiveDownloader("downloads/" + dest_dir)
         archive.get_page(sushi_url)
 
+        current_file_dir = Path(__file__).resolve().parent
+        downloads_dir = current_file_dir.parent / "downloads"
+        book_dest_dir = downloads_dir / dest_dir / "localhost:8181" / "samples" / "PreTeXt_book_test"
+        with open(book_dest_dir / "activecalculus.org" / "single2e" / "sec-5-2-FTC2.html", 'r') as file:
+            page_html = file.read()
+            assert "link href=\"../../fonts.googleapis.com/css2_family" in page_html
+
+        with open(book_dest_dir / "fonts.googleapis.com" / "css2_family_Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" / "index.css", 'r') as file:
+            css_file_contents = file.read()
+            assert "src: url(\"../../fonts.gstatic.com/s/materialsymbolsoutlined" in css_file_contents
+
+        font_size = os.path.getsize(book_dest_dir / "fonts.gstatic.com" / "s" / "materialsymbolsoutlined" / "v290" / "kJF1BvYX7BgnkSrUwT8OhrdQw4oELdPIeeII9v6oDMzByHX9rA6RzaxHMPdY43zj-jCxv3fzvRNU22ZXGJpEpjC_1v-p_4MrImHCIJIZrDCvHOel.woff")
+        assert font_size > 0
