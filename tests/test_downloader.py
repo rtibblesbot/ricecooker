@@ -1,13 +1,11 @@
 import os
 import unittest
 from datetime import datetime
-from time import sleep
 
 import pytest
 from pathlib import Path
 
 from ricecooker.utils import downloader
-from ricecooker.utils.downloader import read
 import http.server
 from threading import Thread
 
