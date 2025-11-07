@@ -390,6 +390,7 @@ def download_static_assets(  # noqa: C901
                 if not ext:
                     ext = ".html"
 
+                subpath = filename
                 # Add the existing filename in front of index.xxx, this can contain slashes and those will result
                 # in subdirectories created in the downloaded version. This ensures multiple instances of extensionless
                 # resources referenced from a page won't clobber each other.
