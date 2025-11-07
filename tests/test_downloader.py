@@ -12,6 +12,8 @@ import shutil
 
 PORT = 8181
 
+# if any changes are needed in the files served out of the "samples" folder, you need to delete the .webcache folder
+# that is generated at the project root for the tests to be rerun
 @pytest.fixture(scope="module")
 def http_local_server():
     # Get the directory containing the current file
@@ -26,6 +28,10 @@ def http_local_server():
 
     def spawn_http_server(arg):
         with  http.server.HTTPServer(("", PORT), Handler) as httpd:
+            # this is a behavior to treat extensionless files as CSS is used by
+            # the test test_pretextbook_css_fetch below, see the docs on that test
+            # method for more info
+            Handler.extensions_map = {'': 'text/css'}
             print("serving at port", PORT)
             try:
                 httpd.serve_forever()
@@ -106,6 +112,14 @@ class TestArchiver(unittest.TestCase):
         )
         assert rel_path == "../kolibri_1.2.3.png"
 
+    # If any changes are needed in the files served out of the "samples" folder, you need to delete the .webcache folder
+    # that is generated at the project root for the tests to be rerun
+    #
+    # This test relies on behavior in the embedded http server declared above as a class level fixture
+    # to treat any extensionless file as having a mime type of text/css.
+    # Handler.extensions_map = {'': 'text/css'}
+    # if another test needs different behavior this may need to be customized or have the fixture be scoped to this test
+    # but for now it seems useful to share the resource between this and other future tests.
     def test_pretextbook_css_fetch(self):
         sushi_url = "http://localhost:" + str(PORT) + "/samples/PreTeXt_book_test/activecalculus.org/single2e/sec-5-2-FTC2.html"
         dest_dir = "active_calc_2e_again_" + datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
@@ -118,13 +132,15 @@ class TestArchiver(unittest.TestCase):
             book_dest_dir = downloads_dir / dest_dir / "localhost:8181" / "samples" / "PreTeXt_book_test"
             with open(book_dest_dir / "activecalculus.org" / "single2e" / "sec-5-2-FTC2.html", 'r') as file:
                 page_html = file.read()
-                assert "link href=\"../../fonts.googleapis.com/css2_family" in page_html
+                assert "link href=\"../../fonts.googleapis.com/css2_family_Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0/index.css" in page_html
 
             with open(book_dest_dir / "fonts.googleapis.com" / "css2_family_Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" / "index.css", 'r') as file:
                 css_file_contents = file.read()
+                # this has an extra '..' compared to what is in the original extensionless css file, because in the course of generating an index.css
+                # file to have clear extensions in the archived version the file ends up nested down another level
                 assert "src: url(\"../../fonts.gstatic.com/s/materialsymbolsoutlined" in css_file_contents
 
-            font_size = os.path.getsize(book_dest_dir / "fonts.gstatic.com" / "s" / "materialsymbolsoutlined" / "v290" / "kJF1BvYX7BgnkSrUwT8OhrdQw4oELdPIeeII9v6oDMzByHX9rA6RzaxHMPdY43zj-jCxv3fzvRNU22ZXGJpEpjC_1v-p_4MrImHCIJIZrDCvHOel.woff")
+            font_size = os.path.getsize(book_dest_dir / "fonts.gstatic.com" / "s" / "materialsymbolsoutlined" / "v290" / "material_symbols.woff")
             assert font_size > 0
         finally:
             shutil.rmtree(downloads_dir / dest_dir)
