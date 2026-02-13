@@ -27,6 +27,8 @@ from ricecooker.utils.caching import CacheControlAdapter
 from ricecooker.utils.caching import CacheForeverHeuristic
 from ricecooker.utils.html import download_file
 from ricecooker.utils.html import replace_links
+from ricecooker.utils.url_utils import _CSS_URL_RE
+from ricecooker.utils.url_utils import is_blacklisted
 from ricecooker.utils.zip import create_predictable_zip
 
 DOWNLOAD_SESSION = requests.Session()  # Session for downloading content from urls
@@ -248,9 +250,6 @@ def make_request(
     return None
 
 
-_CSS_URL_RE = re.compile(r"url\(['\"]?(.*?)['\"]?\)")
-
-
 # TODO(davidhu): Use MD5 hash of URL (ideally file) instead.
 def _derive_filename(url):
     name = os.path.basename(urlparse(url).path).replace("%", "_")
@@ -370,7 +369,7 @@ def download_static_assets(  # noqa: C901
             else:
                 url = urljoin(base_url, node[attr])
 
-            if _is_blacklisted(url, url_blacklist):
+            if is_blacklisted(url, url_blacklist):
                 LOGGER.info("        Skipping downloading blacklisted url", url)
                 node[attr] = ""
                 continue
@@ -463,7 +462,7 @@ def download_static_assets(  # noqa: C901
             else:
                 src_url = urljoin(base_url, src)
 
-            if _is_blacklisted(src_url, url_blacklist):
+            if is_blacklisted(src_url, url_blacklist):
                 print("        Skipping downloading blacklisted url", src_url)
                 return "url()"
 
@@ -805,10 +804,6 @@ def archive_page(
         return page_info
 
     return None
-
-
-def _is_blacklisted(url, url_blacklist):
-    return any((item in url.lower()) for item in url_blacklist)
 
 
 def download_in_parallel(urls, func=None, max_workers=5):

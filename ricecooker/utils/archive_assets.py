@@ -15,6 +15,7 @@ from ricecooker.utils.url_utils import derive_local_filename
 from ricecooker.utils.url_utils import extract_urls_from_css
 from ricecooker.utils.url_utils import extract_urls_from_h5p_json
 from ricecooker.utils.url_utils import extract_urls_from_html
+from ricecooker.utils.url_utils import is_blacklisted
 from ricecooker.utils.url_utils import rewrite_urls_in_css
 from ricecooker.utils.url_utils import rewrite_urls_in_h5p_json
 from ricecooker.utils.url_utils import rewrite_urls_in_html
@@ -54,13 +55,6 @@ def _compute_relative_path(from_file, to_file):
     """Compute relative path from one file to another within the archive."""
     from_dir = os.path.dirname(from_file)
     return os.path.relpath(to_file, from_dir).replace("\\", "/")
-
-
-def _is_blacklisted(url, blacklist):
-    """Check if a URL matches any blacklist substring."""
-    if not blacklist:
-        return False
-    return any(pattern in url for pattern in blacklist)
 
 
 def _download_external_url(url, dest_dir, local_path):
@@ -128,7 +122,7 @@ def _scan_archive_for_urls(temp_dir, url_blacklist):
                 continue
 
             external = [
-                e for e in extracted if not _is_blacklisted(e.url, url_blacklist)
+                e for e in extracted if not is_blacklisted(e.url, url_blacklist)
             ]
             if external:
                 file_urls[rel_path] = external
@@ -239,7 +233,7 @@ def _process_downloaded_css(
         return
 
     extracted = extract_urls_from_css(css_content, css_local_path)
-    external = [e for e in extracted if not _is_blacklisted(e.url, url_blacklist)]
+    external = [e for e in extracted if not is_blacklisted(e.url, url_blacklist)]
 
     if not external:
         return

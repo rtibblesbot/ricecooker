@@ -9,6 +9,7 @@ from ricecooker.utils.url_utils import derive_local_filename
 from ricecooker.utils.url_utils import extract_urls_from_css
 from ricecooker.utils.url_utils import extract_urls_from_h5p_json
 from ricecooker.utils.url_utils import extract_urls_from_html
+from ricecooker.utils.url_utils import is_blacklisted
 from ricecooker.utils.url_utils import is_external_url
 from ricecooker.utils.url_utils import rewrite_urls_in_css
 from ricecooker.utils.url_utils import rewrite_urls_in_h5p_json
@@ -47,6 +48,32 @@ class TestIsExternalURL:
 
     def test_javascript_uri(self):
         assert is_external_url("javascript:void(0)") is False
+
+
+# ---------------------------------------------------------------------------
+# is_blacklisted tests
+# ---------------------------------------------------------------------------
+
+
+class TestIsBlacklisted:
+    def test_match_substring(self):
+        assert is_blacklisted("https://ads.example.com/track.js", ["ads.example"]) is True
+
+    def test_no_match(self):
+        assert is_blacklisted("https://cdn.example.com/lib.js", ["ads.example"]) is False
+
+    def test_case_insensitive(self):
+        assert is_blacklisted("https://ADS.Example.com/track.js", ["ads.example"]) is True
+
+    def test_empty_blacklist(self):
+        assert is_blacklisted("https://example.com/file.js", []) is False
+
+    def test_none_blacklist(self):
+        assert is_blacklisted("https://example.com/file.js", None) is False
+
+    def test_multiple_patterns(self):
+        blacklist = ["ads.example", "tracker.net"]
+        assert is_blacklisted("https://tracker.net/pixel.gif", blacklist) is True
 
 
 # ---------------------------------------------------------------------------

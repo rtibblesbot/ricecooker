@@ -45,6 +45,13 @@ def is_external_url(url):
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
+def is_blacklisted(url, url_blacklist):
+    """Check if a URL matches any blacklist substring (case-insensitive)."""
+    if not url_blacklist:
+        return False
+    return any(item in url.lower() for item in url_blacklist)
+
+
 def derive_local_filename(url):
     """
     Derive a deterministic local filename from an external URL.
