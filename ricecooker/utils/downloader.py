@@ -3,7 +3,6 @@ import copy
 import json
 import mimetypes
 import os
-import re
 import shutil
 import tempfile
 import time
@@ -27,6 +26,7 @@ from ricecooker.utils.caching import CacheControlAdapter
 from ricecooker.utils.caching import CacheForeverHeuristic
 from ricecooker.utils.html import download_file
 from ricecooker.utils.html import replace_links
+from ricecooker.utils.url_utils import _CSS_IMPORT_RE
 from ricecooker.utils.url_utils import _CSS_URL_RE
 from ricecooker.utils.url_utils import is_blacklisted
 from ricecooker.utils.zip import create_predictable_zip
@@ -250,9 +250,6 @@ def make_request(
     return None
 
 
-_CSS_IMPORT_RE = re.compile(r"@import['\"](.*?)['\"]")
-
-
 # TODO(davidhu): Use MD5 hash of URL (ideally file) instead.
 def _derive_filename(url):
     name = os.path.basename(urlparse(url).path).replace("%", "_")
@@ -311,14 +308,17 @@ def download_static_assets(  # noqa: C901
     def download_srcset(selector, attr, content_middleware=None):
         nodes = doc.select(selector)
 
-        for i, node in enumerate(nodes):
+        for node in nodes:
             srcset = node[attr]
-            sources = srcset.split(",")
-            new_sources = []
-            for source in sources:
-                # a source can be just a URL, or a URL + a space character and then a width or resolution.
-                parts = source.split(" ")
-                url = urljoin(base_url, parts[0])
+            new_entries = []
+            for entry in srcset.split(","):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                parts = entry.split()
+                src_url = parts[0]
+                descriptor = parts[1] if len(parts) > 1 else None
+                url = urljoin(base_url, src_url)
                 filename = derive_filename(url)
                 new_url = filename
                 if relative_links and base_url:
@@ -337,11 +337,11 @@ def download_static_assets(  # noqa: C901
                         filename=filename,
                         middleware_callbacks=content_middleware,
                     )
-                if len(parts) > 1:
-                    new_sources.append(" ".join([new_url, parts[1]]))
+                if descriptor:
+                    new_entries.append("{} {}".format(new_url, descriptor))
                 else:
-                    new_sources.append(new_url)
-            node[attr] = ", ".join(new_sources)
+                    new_entries.append(new_url)
+            node[attr] = ", ".join(new_entries)
 
     # Helper function to download all assets for a given CSS selector.
     def download_assets(
@@ -362,8 +362,7 @@ def download_static_assets(  # noqa: C901
                 continue
 
             if "background-image" in selector:
-                css_path_regex = r"url\(['\"]?([^?'\"]+)?(\?[^'\"]+)?(['\"]?\))"
-                url_match = re.search(css_path_regex, node["style"])
+                url_match = _CSS_URL_RE.search(node["style"])
                 if url_match:
                     background_image_url = url_match.group(1)
                     url = urljoin(base_url, background_image_url)

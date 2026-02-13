@@ -1,9 +1,9 @@
 """
-Shared URL extraction and rewriting utilities for archive processing.
+Shared URL extraction and rewriting utilities.
 
 These functions operate on content strings (HTML, CSS, JSON) — no HTTP,
-no filesystem, no platform-specific paths. They can be used by both
-ricecooker's pipeline and Studio's upload processing.
+no filesystem, no platform-specific paths. Used by both downloader.py
+(web scraping) and archive_assets.py (archive pipeline processing).
 
 Supersedes issue #303 by making URL detection/rewriting independently
 unit-testable.
@@ -33,7 +33,7 @@ class ExtractedURL:
 # Matches url('...'), url("..."), and url(...)
 _CSS_URL_RE = re.compile(r"url\(['\"]?(.*?)['\"]?\)")
 # Matches @import '...' and @import "..." (bare string form, not url() form)
-_CSS_IMPORT_RE = re.compile(r"@import\s+['\"]([^'\"]+)['\"]")
+_CSS_IMPORT_RE = re.compile(r"@import\s*['\"]([^'\"]+)['\"]")
 
 
 def is_external_url(url):
@@ -106,7 +106,7 @@ def extract_urls_from_css(css_content, source_file=""):
     return results
 
 
-def _parse_srcset(srcset_value):
+def parse_srcset(srcset_value):
     """Parse an HTML srcset attribute value into a list of URLs."""
     urls = []
     for entry in srcset_value.split(","):
@@ -141,7 +141,7 @@ def _extract_srcset_urls(soup, source_file, seen, results):
     """Extract external URLs from srcset attributes on img, source tags."""
     for tag_name in ("img", "source"):
         for node in soup.find_all(tag_name, srcset=True):
-            for url in _parse_srcset(node["srcset"]):
+            for url in parse_srcset(node["srcset"]):
                 if is_external_url(url) and url not in seen:
                     seen.add(url)
                     results.append(
