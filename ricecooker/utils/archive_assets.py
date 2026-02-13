@@ -5,7 +5,6 @@ Opens an archive (ZIP/H5P), scans text-based files for external URL references,
 downloads those resources, bundles them into the archive, and rewrites references
 to point to local copies.
 """
-
 import logging
 import os
 import tempfile

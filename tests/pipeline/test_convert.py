@@ -1,5 +1,4 @@
 """Tests for audio and video compression in archive files."""
-
 import json
 import os
 import tempfile

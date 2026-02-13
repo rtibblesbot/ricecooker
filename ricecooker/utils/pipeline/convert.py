@@ -2,7 +2,6 @@
 To avoid making the pipeline overly convoluted, these handlers
 both validate and convert files.
 """
-
 import json
 import os
 import shutil

@@ -8,7 +8,6 @@ ricecooker's pipeline and Studio's upload processing.
 Supersedes issue #303 by making URL detection/rewriting independently
 unit-testable.
 """
-
 import json
 import os
 import re

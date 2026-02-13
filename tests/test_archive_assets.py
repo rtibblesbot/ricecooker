@@ -4,7 +4,6 @@ Tests for ricecooker.utils.archive_assets — archive external reference process
 Tests create in-memory ZIP archives, call download_and_rewrite_external_refs,
 and verify the output directory contents. HTTP downloads are mocked.
 """
-
 import json
 import os
 import shutil

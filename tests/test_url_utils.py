@@ -3,7 +3,6 @@ Tests for ricecooker.utils.url_utils — shared URL extraction and rewriting.
 
 All tests operate on plain strings. No HTTP, no filesystem, no archives.
 """
-
 import json
 
 from ricecooker.utils.url_utils import derive_local_filename
