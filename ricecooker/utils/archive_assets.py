@@ -24,6 +24,7 @@ from ricecooker.config import LOGGER
 from ricecooker.utils.pipeline.exceptions import ExpectedFileException
 from ricecooker.utils.pipeline.exceptions import InvalidFileException
 from ricecooker.utils.references import DEFAULT_MAPPERS
+from ricecooker.utils.references import is_data_uri
 from ricecooker.utils.references import is_external_url
 from ricecooker.utils.utils import extract_path_ext
 
@@ -128,7 +129,7 @@ class ArchiveProcessor:
 
         def localize(ref):
             nonlocal rewrote
-            if not is_external_url(ref):
+            if not (is_external_url(ref) or is_data_uri(ref)):
                 return ref
             asset_path = self._fetch_into(ref, source_dir)
             if asset_path is None:
