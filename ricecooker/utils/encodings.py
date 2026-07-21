@@ -1,8 +1,27 @@
 import base64
+import mimetypes
 import re
 
 BASE64_REGEX_STR = r"data:image\/([A-Za-z]*);base64,((?:[A-Za-z0-9+\/]{4})*(?:[A-Za-z0-9+\/]{2}==|[A-Za-z0-9+\/]{3}=)*)"
 BASE64_REGEX = re.compile(BASE64_REGEX_STR, flags=re.IGNORECASE)
+
+DATA_URI_BASE64_REGEX = re.compile(
+    r"^data:([\w.+-]+/[\w.+-]+)?(?:;[\w-]+=[^;,]+)*;base64,([A-Za-z0-9+/=\s]+)$",
+    flags=re.IGNORECASE,
+)
+
+# Extensions single-file-cli commonly emits, where mimetypes.guess_extension is
+# absent or picks a less conventional variant (e.g. .jpe for image/jpeg).
+_DATA_URI_EXTENSIONS = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/svg+xml": "svg",
+    "image/webp": "webp",
+    "font/woff2": "woff2",
+    "font/woff": "woff",
+    "font/ttf": "ttf",
+}
 
 
 def get_base64_encoding(text):
@@ -12,6 +31,39 @@ def get_base64_encoding(text):
     Returns: First match in text
     """
     return BASE64_REGEX.search(text)
+
+
+def get_base64_data_uri(text):
+    """Match a base64 ``data:`` URI of any mimetype, anchored at string start.
+
+    Args:
+        text (str): text to check for a base64 data URI
+    Returns: the match (group 1 = mimetype, group 2 = base64 data) or None
+    """
+    return DATA_URI_BASE64_REGEX.match(text)
+
+
+def ext_from_data_uri_mimetype(mimetype):
+    """Map a ``data:`` URI mimetype to a file extension (no leading dot).
+
+    Args:
+        mimetype (str): the mimetype from a data URI (e.g. ``font/woff2``)
+    Returns: the extension without a dot, or None if it cannot be determined
+    """
+    if not mimetype:
+        return None
+    mimetype = mimetype.lower()
+    if mimetype in _DATA_URI_EXTENSIONS:
+        return _DATA_URI_EXTENSIONS[mimetype]
+    # single-file-cli only inlines images and fonts as data: URIs, so restrict
+    # the guess_extension fallback to those. This keeps a non-asset mimetype
+    # (e.g. text/plain) rejected rather than decoded to a spurious file, and
+    # avoids depending on the platform-specific mimetypes registry for
+    # arbitrary types.
+    if not mimetype.startswith(("image/", "font/")):
+        return None
+    guessed = mimetypes.guess_extension(mimetype)
+    return guessed.lstrip(".") if guessed else None
 
 
 def write_base64_to_file(encoding, fpath_out):
