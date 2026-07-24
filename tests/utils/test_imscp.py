@@ -124,3 +124,38 @@ def test_leaf_source_id_from_identifier(tmp_path):
     manifest = parse_imscp_manifest(ims_dir)
     leaf = manifest["children"][0]["children"][0]
     assert leaf["source_id"] == "ITEM-56C2D9D9-ACA6-40B5-8A5D-A70DB05370FC"
+
+
+def _write_manifest(directory, manifest_xml):
+    with open(os.path.join(directory, "imsmanifest.xml"), "w", encoding="utf-8") as fh:
+        fh.write(manifest_xml)
+
+
+def test_xml_base_applied_to_index_file(tmp_path):
+    # index_file must carry the same xml:base offset as the resource's members,
+    # or it resolves to a nonexistent path and the whole resource is dropped.
+    _write_manifest(
+        str(tmp_path),
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<manifest xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2" identifier="M">'
+        '<organizations default="ORG"><organization identifier="ORG"><title>Org</title>'
+        '<item identifier="IT" identifierref="RES"><title>Leaf</title></item>'
+        "</organization></organizations>"
+        '<resources><resource identifier="RES" type="webcontent" '
+        'xml:base="content/" href="start.html"><file href="start.html"/>'
+        "</resource></resources></manifest>",
+    )
+    assert leaf["index_file"] == "content/start.html"
+    assert leaf["files"] == ["content/start.html"]
+
+
+def test_masteryscore_element_surfaced(tmp_path):
+    # <adlcp:masteryscore> is a child element of the item, not an attribute; the
+    # parser must still surface it for the assessment classifier.
+    leaf = _parse_leaf(
+        tmp_path,
+        '<resource identifier="RES" type="webcontent" href="q.html">'
+        '<file href="q.html"/></resource>',
+        item_body="<adlcp:masteryscore>80</adlcp:masteryscore>",
+    )
+    assert leaf["masteryscore"] == "80"
