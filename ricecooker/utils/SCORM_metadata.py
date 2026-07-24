@@ -19,20 +19,6 @@ LOGGER = logging.getLogger(__name__)
 # than allowed to fail the whole channel.
 MAX_TAG_LENGTH = 30
 
-# LOM sections and the fields the parser lifts out of each. Keyed by the LOM
-# ``<general>``/``<rights>``/``<educational>``/``<lifeCycle>`` element name.
-imscp_metadata_keys = {
-    "general": ["title", "description", "language", "keyword"],
-    "rights": ["cost", "copyrightAndOtherRestrictions", "description"],
-    "educational": [
-        "interactivityType",
-        "interactivityLevel",
-        "learningResourceType",
-        "intendedEndUserRole",
-    ],
-    "lifeCycle": ["contribute"],
-}
-
 
 # LOM educational learningResourceType -> (le_utils learning activity,
 # educator-focused le_utils resource type). One table so the two vocabularies
@@ -56,46 +42,49 @@ _LEARNING_RESOURCE_TYPE_MAPPINGS = {
 }
 
 
-def _ensure_list(value):
-    """Normalize a value to a list: None -> [], str -> [str], other -> list."""
-    if value is None:
-        return []
+def _text_list(value):
+    """Flatten a LOM field (a string, a list, or a list of lists) to its text values.
+
+    Non-text entries are dropped: an empty LOM element parses to ``None``, and a
+    repeated element parses to a nested list.
+    """
     if isinstance(value, str):
         return [value]
-    return list(value)
+    if not isinstance(value, (list, tuple)):
+        return []
+    texts = []
+    for item in value:
+        if isinstance(item, str):
+            texts.append(item)
+        elif isinstance(item, (list, tuple)):
+            texts.extend(t for t in item if isinstance(t, str))
+    return texts
+
+
+def _first_text(value):
+    """The first non-blank text value of a LOM field, or None when it has none."""
+    return next((t for t in _text_list(value) if t.strip()), None)
 
 
 def map_scorm_to_le_utils_activities(metadata_dict):
-    le_utils_activities = []
-
-    # When the resource is not interactive, downgrade activities that imply
-    # interactivity to a passive equivalent (simulation -> read, else watch).
-    interactive_adjustments = {
-        learning_activities.EXPLORE: (
-            learning_activities.READ,
-            learning_activities.WATCH,
-        )
-    }
-
-    interactivity_type = metadata_dict.get("interactivityType")
-    interactivity_level = metadata_dict.get("interactivityLevel")
-
-    is_interactive = interactivity_type in [
+    interactivity_type = _first_text(metadata_dict.get("interactivityType"))
+    interactivity_level = _first_text(metadata_dict.get("interactivityLevel"))
+    is_interactive = interactivity_type in (
         "active",
         "mixed",
-    ] or interactivity_level in ["medium", "high"]
+    ) or interactivity_level in ("medium", "high")
 
-    learning_resource_types = _ensure_list(metadata_dict.get("learningResourceType"))
-
-    for learning_resource_type in learning_resource_types:
-        le_utils_type = SCORM_to_learning_activities_mappings.get(
-            learning_resource_type
-        )
-        if not is_interactive and le_utils_type in interactive_adjustments:
-            le_utils_type = (
-                interactive_adjustments[le_utils_type][0]
-                if learning_resource_type == "simulation"
-                else interactive_adjustments[le_utils_type][1]
+    activities = []
+    for lrt in _text_list(metadata_dict.get("learningResourceType")):
+        mapping = _LEARNING_RESOURCE_TYPE_MAPPINGS.get(lrt)
+        activity = mapping[0] if mapping else None
+        # A non-interactive resource cannot be explored: read a simulation of
+        # one, watch the rest.
+        if activity == learning_activities.EXPLORE and not is_interactive:
+            activity = (
+                learning_activities.READ
+                if lrt == "simulation"
+                else learning_activities.WATCH
             )
         if activity and activity not in activities:
             activities.append(activity)
@@ -112,24 +101,24 @@ SCORM_intended_role_to_resource_type_mapping = {
 
 
 def map_scorm_to_educator_resource_types(metadata_dict):
-    educator_resource_types = []
-
-    learning_resource_types = _ensure_list(metadata_dict.get("learningResourceType"))
-    intended_roles = _ensure_list(metadata_dict.get("intendedEndUserRole"))
-
-    for learning_resource_type in learning_resource_types:
-        mapped_type = SCORM_to_resource_type_mappings.get(learning_resource_type)
-        if mapped_type and mapped_type not in educator_resource_types:
-            educator_resource_types.append(mapped_type)
+    lrt_types = {
+        lrt: mapping[1] for lrt, mapping in _LEARNING_RESOURCE_TYPE_MAPPINGS.items()
+    }
+    types = []
+    for key, mapping in (
+        ("learningResourceType", lrt_types),
+        ("intendedEndUserRole", SCORM_intended_role_to_resource_type_mapping),
+    ):
+        for text in _text_list(metadata_dict.get(key)):
+            mapped = mapping.get(text)
+            if mapped and mapped not in types:
+                types.append(mapped)
 
     return types
 
 
 def infer_beginner_level_from_difficulty(metadata_dict):
-    beginner_difficulties = {"very easy", "easy"}
-
-    difficulty = metadata_dict.get("difficulty")
-    if difficulty in beginner_difficulties:
+    if _first_text(metadata_dict.get("difficulty")) in ("very easy", "easy"):
         return [needs.FOR_BEGINNERS]
     return []
 
@@ -156,8 +145,10 @@ def infer_license_from_rights(metadata_dict):
 
     Either or both may be ``None``.
     """
-    description = metadata_dict.get("rights_description")
-    copyright_restrictions = metadata_dict.get("copyrightAndOtherRestrictions")
+    description = _first_text(metadata_dict.get("rights_description"))
+    copyright_restrictions = _first_text(
+        metadata_dict.get("copyrightAndOtherRestrictions")
+    )
 
     if description:
         for pattern, license_id in _CC_LICENSE_PATTERNS:
@@ -192,7 +183,8 @@ def extract_lifecycle_contributors(metadata_dict):
         role_value = entry.get("role", {})
         if isinstance(role_value, dict):
             role_value = role_value.get("value", "")
-        entity = entry.get("entity", "")
+        role_value = _first_text(role_value)
+        entity = _first_text(entry.get("entity")) or ""
 
         field_config = _ROLE_TO_FIELD.get(role_value)
         if not field_config:
@@ -215,54 +207,23 @@ def _normalize_language(lang_code):
 
 def _normalize_keywords(keyword):
     """Normalize the keyword field to a list of usable tags, or None if empty."""
-    keywords = _ensure_list(keyword)
-    tags = [k for k in keywords if k and len(k) <= MAX_TAG_LENGTH]
-    for dropped in [k for k in keywords if k and len(k) > MAX_TAG_LENGTH]:
-        LOGGER.warning(
-            "SCORM: dropping keyword longer than %s characters: %s",
-            MAX_TAG_LENGTH,
-            dropped,
-        )
+    tags = []
+    for keyword_text in _text_list(keyword):
+        if not keyword_text:
+            continue
+        if len(keyword_text) > MAX_TAG_LENGTH:
+            LOGGER.warning(
+                "SCORM: dropping keyword longer than %s characters: %s",
+                MAX_TAG_LENGTH,
+                keyword_text,
+            )
+        else:
+            tags.append(keyword_text)
     return tags or None
 
 
 def metadata_dict_to_content_node_fields(metadata_dict):
-    """Convert a raw LOM metadata dict to ``ContentNodeMetadata`` fields.
-
-    Maps title/description/language/keyword straight through (language
-    normalized, keyword -> tags), educational fields to learning_activities /
-    resource_types / learner_needs, rights to license / license_description, and
-    lifeCycle contribute to author / provider / copyright_holder. Only non-empty
-    values are returned.
-    """
-    result = {}
-
-    if metadata_dict.get("title"):
-        result["title"] = metadata_dict["title"]
-
-    if metadata_dict.get("description"):
-        result["description"] = metadata_dict["description"]
-
-    language = _normalize_language(metadata_dict.get("language", ""))
-    if language:
-        result["language"] = language
-
-    tags = _normalize_keywords(metadata_dict.get("keyword", []))
-    if tags:
-        result["tags"] = tags
-
-    activities = map_scorm_to_le_utils_activities(metadata_dict)
-    if activities:
-        result["learning_activities"] = activities
-
-    resource_types = map_scorm_to_educator_resource_types(metadata_dict)
-    if resource_types:
-        result["resource_types"] = resource_types
-
-    learner_needs = infer_beginner_level_from_difficulty(metadata_dict)
-    if learner_needs:
-        result["learner_needs"] = learner_needs
-
+    """Convert a raw LOM metadata dict to ``ContentNodeMetadata`` fields, dropping empties."""
     license_id, license_description = infer_license_from_rights(metadata_dict)
     fields = {
         # title/description/language are single-valued on a content node, but LOM

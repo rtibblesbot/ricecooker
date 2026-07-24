@@ -1012,6 +1012,20 @@ class ContentNode(TreeNode):
             copyright_holder=pick("copyright_holder", "copyright_holder"),
             description=pick("license_description", "description"),
         )
+        # Metadata routinely names a license that requires attribution without
+        # naming anyone to attribute. Applying it would fail node validation and
+        # take the whole package down, so keep the license the caller supplied.
+        if (
+            existing is not None
+            and node.license.require_copyright_holder
+            and not node.license.copyright_holder
+        ):
+            config.LOGGER.warning(
+                "Ignoring inferred %s license for %s: it requires a copyright holder and none was given",
+                license_id,
+                node.source_id,
+            )
+            node.license = existing
 
     def _process_uri(self):
         try:

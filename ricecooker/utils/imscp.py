@@ -288,8 +288,10 @@ def _collect_resources(item, resources, index=1):
                 item["identifierref"],
             )
             return
+        # The item's own attributes win — a resource carries its own
+        # ``identifier``, which must not displace the item's identity.
         for key, value in resource.attrib.items():
-            item[_strip_ns(key)] = value
+            item.setdefault(_strip_ns(key), value)
         resource_type = resource.get("type")
         # Both webcontent and QTI resources carry their own file members; QTI
         # resources are rejected downstream, but deriving their files keeps the

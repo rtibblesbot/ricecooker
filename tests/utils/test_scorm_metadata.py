@@ -117,6 +117,34 @@ def test_metadata_dict_to_content_node_fields_empty():
     assert metadata_dict_to_content_node_fields({}) == {}
 
 
+def test_multilingual_lom_fields_reduce_to_single_values():
+    # LOM repeats a field per language, so the parser hands back lists (and lists
+    # of lists for repeated elements). Node fields that must be strings take the
+    # first value, and mapping lookups must not be handed an unhashable list.
+    fields = metadata_dict_to_content_node_fields(
+        {
+            "title": ["Intro to Widgets", "Introducción a los Widgets"],
+            "description": ["A short lesson.", "Una lección corta."],
+            "language": ["en-US", "es"],
+            "keyword": [["widgets", "gears"], "cogs"],
+            "learningResourceType": [["narrative text"], "lecture"],
+            "intendedEndUserRole": [["teacher"]],
+            "rights_description": ["Creative Commons Attribution 4.0", "CC BY 4.0"],
+        }
+    )
+    assert fields["title"] == "Intro to Widgets"
+    assert fields["description"] == "A short lesson."
+    assert fields["language"] == "en"
+    assert fields["tags"] == ["widgets", "gears", "cogs"]
+    assert fields["learning_activities"] == [
+        learning_activities.READ,
+        learning_activities.WATCH,
+    ]
+    assert resource_type.LESSON_PLAN in fields["resource_types"]
+    assert fields["license"] == licenses.CC_BY
+    assert fields["license_description"] == "Creative Commons Attribution 4.0"
+
+
 def test_over_long_keywords_are_dropped():
     # LOM keywords are often whole phrases, and a tag over 30 characters fails
     # node validation — dropping it must not take the whole package down with it.

@@ -1210,6 +1210,26 @@ class TestIMSCPDecomposition:
         assert learning_activities.READ in leaf.learning_activities
         assert leaf.tags == ["databases"]
 
+    def test_inferred_license_needing_a_holder_is_ignored(self):
+        # The package's LOM names CC BY-SA, but neither it nor the chef supplies a
+        # copyright holder. Applying it would fail node validation and abort the
+        # whole channel, so the chef's own license is kept instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "meta.zip")
+            _build_metadata_imscp(path)
+            node = ContentNode(
+                source_id="pkg",
+                title="Pkg",
+                license=get_license(licenses.PUBLIC_DOMAIN),
+                uri=path,
+                pipeline=FilePipeline(),
+            )
+            node.process_files()
+
+        leaf = node.children[0].children[0]
+        assert leaf.kind == content_kinds.DOCUMENT
+        assert leaf.license.license_id == licenses.PUBLIC_DOMAIN
+
     def test_manifest_href_traversal_is_rejected(self):
         # A manifest whose href points outside the extracted package (a hostile
         # ../ traversal) must not read that file into the decomposed output: the
