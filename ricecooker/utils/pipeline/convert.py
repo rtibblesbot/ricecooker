@@ -21,6 +21,7 @@ from xml.etree import ElementTree
 import filetype
 import html5lib
 from html5lib.html5parser import ParseError
+from le_utils.constants import content_kinds
 from le_utils.constants import file_formats
 from le_utils.constants import format_presets
 from PIL import Image
@@ -33,11 +34,14 @@ from ricecooker.exceptions import UnknownFileTypeError
 from ricecooker.utils.audio import AudioCompressionError
 from ricecooker.utils.audio import compress_audio
 from ricecooker.utils.caching import generate_key
+from ricecooker.utils.imscp import parse_imscp_manifest
 from ricecooker.utils.paths import extract_path_ext
 from ricecooker.utils.pipeline.context import ContentNodeMetadata
 from ricecooker.utils.pipeline.context import ContextMetadata
 from ricecooker.utils.pipeline.context import FileMetadata
 from ricecooker.utils.pipeline.exceptions import InvalidFileException
+from ricecooker.utils.pipeline.scorm import has_assessment_semantics
+from ricecooker.utils.pipeline.scorm import single_media_member
 from ricecooker.utils.pipeline.scorm import strip_scorm_boilerplate
 from ricecooker.utils.references import DEFAULT_MAPPERS
 from ricecooker.utils.references import ReferenceMapper
@@ -825,6 +829,173 @@ class DocumentConversionHandler(ExtensionMatchingHandler):
             _seal_directory_to_file(self, temp_dir, file_formats.HTML5_ARTICLE)
 
 
+# Presets whose files ride alongside a primary file (thumbnails, subtitles); they
+# never define a node's kind.
+_SUPPLEMENTARY_PRESETS = frozenset(
+    p.id for p in format_presets.PRESETLIST if p.supplementary
+)
+
+
+def _content_node_field(content_node_metadata, key):
+    """Read ``key`` off a ContentNodeMetadata that may be an object or a dict.
+
+    A sub-pipeline result carries it as a dict (``merge`` round-trips through
+    ``to_dict``); a freshly built one is the dataclass.
+    """
+    if content_node_metadata is None:
+        return None
+    if isinstance(content_node_metadata, dict):
+        return content_node_metadata.get(key)
+    return getattr(content_node_metadata, key, None)
+
+
+def _summarize_leaf(sub):
+    """Reduce a sub-pipeline result to ``(kind, file dicts, extra_fields)``.
+
+    The node's kind/extra_fields come from its primary (non-supplementary) file;
+    every file dict is retained so the leaf is backed by its own sealed files.
+    """
+    files = [fm.to_dict() for fm in sub]
+    for fm in sub:
+        if fm.preset in _SUPPLEMENTARY_PRESETS:
+            continue
+        # merge() round-trips through to_dict(), so a pipeline result always
+        # carries its content-node metadata as a plain dict.
+        metadata = fm.content_node_metadata or {}
+        return metadata.get("kind"), files, metadata.get("extra_fields")
+    return None, files, None
+
+
+class IMSCPConversionHandler(ExtensionMatchingHandler):
+    """Decompose an IMS Content Package (incl. SCORM) into a native node subtree.
+
+    Every surviving leaf re-enters the pipeline to be sealed into its own file, so
+    no leaf is backed by the whole package zip. Must be registered before
+    ``HTML5ConversionHandler``, which claims any ``.zip``.
+    """
+
+    EXTENSIONS = {file_formats.HTML5}
+
+    def should_handle(self, path):
+        if not super().should_handle(path):
+            return False
+        try:
+            with zipfile.ZipFile(path) as zf:
+                return "imsmanifest.xml" in zf.namelist()
+        except (ValueError, zipfile.BadZipFile):
+            return False
+
+    def handle_file(self, path, audio_settings=None, video_settings=None):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with zipfile.ZipFile(path) as zf:
+                zf.extractall(temp_dir)
+            manifest = parse_imscp_manifest(temp_dir)
+            children = self._build_nodes(manifest.get("children"), temp_dir)
+        return FileMetadata(
+            content_node_metadata=ContentNodeMetadata(
+                kind=content_kinds.TOPIC,
+                title=manifest.get("title"),
+                children=children,
+            )
+        )
+
+    def _build_nodes(self, nodes, package):
+        built = [self._build_node(node, package) for node in nodes or []]
+        return [node for node in built if node is not None]
+
+    def _build_node(self, node_dict, package):
+        if node_dict.get("children"):
+            # A topic whose leaves were all rejected keeps its (empty) folder.
+            return {
+                "source_id": node_dict["source_id"],
+                "title": node_dict.get("title") or node_dict["source_id"],
+                "children": self._build_nodes(node_dict["children"], temp_dir),
+            }
+        return self._build_leaf(node_dict, temp_dir)
+
+    def _build_leaf(self, node_dict, package):
+        source_id = node_dict.get("source_id")
+        if node_dict.get("type") != "webcontent" or not node_dict.get("index_file"):
+            LOGGER.warning(
+                "IMSCP: skipping unsupported resource %s (type=%s)",
+                source_id,
+                node_dict.get("type"),
+            )
+            return None
+
+        index_path = os.path.join(temp_dir, node_dict["index_file"])
+        try:
+            with open(index_path, "rb") as fh:
+                index_html = fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            LOGGER.warning(
+                "IMSCP: skipping resource %s, index file missing: %s",
+                source_id,
+                node_dict.get("index_file"),
+            )
+            return None
+
+        members = node_dict.get("files") or []
+        if has_assessment_semantics(index_html, members, node_dict):
+            LOGGER.warning("IMSCP: rejecting assessment resource %s", source_id)
+            return None
+
+        media = single_media_member({**node_dict, "index_html": index_html})
+        if media:
+            sub = self.get_pipeline().execute(os.path.join(temp_dir, media))
+        else:
+            sub = self._process_html5_leaf(node_dict, temp_dir)
+        if not sub:
+            LOGGER.warning("IMSCP: skipping resource %s, produced no files", source_id)
+            return None
+
+        kind, files, extra_fields = _summarize_leaf(sub)
+        leaf = {
+            "source_id": source_id,
+            "title": node_dict.get("title") or source_id,
+            "kind": kind,
+            "files": files,
+        }
+        if extra_fields:
+            leaf["extra_fields"] = extra_fields
+        return leaf
+
+    def _process_html5_leaf(self, node_dict, temp_dir):
+        """Seal the resource's own members into a zip and process it as HTML5/KPUB."""
+        index_file = node_dict["index_file"]
+        with tempfile.TemporaryDirectory() as staging:
+            package.stage([index_file] + list(node_dict.get("files") or []), staging)
+            # A root ``index.html`` is the entry point Kolibri expects; alias the
+            # index to it only when the index already sits at the staging root,
+            # where the copy resolves the same relative references. A deeper entry
+            # is left where it is — HTML5ConversionHandler records it as a hint.
+            if "/" not in index_file and index_file != "index.html":
+                index_src = contained_path(package.directory, index_file)
+                if index_src and os.path.isfile(index_src):
+                    shutil.copyfile(index_src, os.path.join(staging, "index.html"))
+            zip_path = create_predictable_zip(staging)
+        try:
+            return self.get_pipeline().execute(zip_path)
+        finally:
+            os.unlink(zip_path)
+
+    def _stage_leaf(self, node_dict, temp_dir, dest_dir):
+        """Copy the resource's members into ``dest_dir`` (relative paths preserved),
+        guaranteeing a root ``index.html`` entry."""
+        dest_root = os.path.abspath(dest_dir)
+        for member in node_dict.get("files") or []:
+            src = os.path.join(temp_dir, member)
+            dst = os.path.abspath(os.path.join(dest_dir, member))
+            # Guard against a manifest href escaping the staging dir.
+            if not os.path.isfile(src) or not dst.startswith(dest_root + os.sep):
+                continue
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copyfile(src, dst)
+        index_dst = os.path.join(dest_dir, "index.html")
+        if not os.path.isfile(index_dst):
+            shutil.copyfile(os.path.join(temp_dir, node_dict["index_file"]), index_dst)
+
+
 class ConversionStageHandler(StageHandler):
     STAGE = "CONVERT"
     DEFAULT_CHILDREN = [
@@ -835,6 +1006,7 @@ class ConversionStageHandler(StageHandler):
         BloomConversionHandler,
         EPUBConversionHandler,
         H5PConversionHandler,
+        IMSCPConversionHandler,
         HTML5ConversionHandler,
         DocumentConversionHandler,
         KPUBConversionHandler,
