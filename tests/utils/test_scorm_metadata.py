@@ -115,3 +115,12 @@ def test_metadata_dict_to_content_node_fields_full():
 
 def test_metadata_dict_to_content_node_fields_empty():
     assert metadata_dict_to_content_node_fields({}) == {}
+
+
+def test_over_long_keywords_are_dropped():
+    # LOM keywords are often whole phrases, and a tag over 30 characters fails
+    # node validation — dropping it must not take the whole package down with it.
+    fields = metadata_dict_to_content_node_fields(
+        {"keyword": ["widgets", "Data (especially computer data)!"]}
+    )
+    assert fields["tags"] == ["widgets"]

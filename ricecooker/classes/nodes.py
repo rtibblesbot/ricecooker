@@ -986,29 +986,32 @@ class ContentNode(TreeNode):
     def _apply_license_metadata(self, node, metadata, skip):
         """Apply license/copyright fields to ``node`` through ``set_license``.
 
-        A new license id rebuilds the License; when only a holder/description is
-        supplied, the node's existing License is enriched rather than dropped.
+        Always builds a fresh License rather than editing the node's existing one:
+        descendants are handed the package's License object, so mutating it in
+        place would leak one resource's LOM rights onto every other node.
+        Unsupplied fields are inherited from that existing License.
         """
         present = self._LICENSE_METADATA_KEYS & metadata.keys() - skip
         if not present:
             return
-        copyright_holder = metadata.get("copyright_holder")
-        description = metadata.get("license_description")
-        if "license" in present:
-            # LOM may refine the license type without naming a holder; inherit the
-            # node's existing holder so a holder-requiring license stays valid.
-            if copyright_holder is None and node.license is not None:
-                copyright_holder = node.license.copyright_holder
-            node.set_license(
-                metadata["license"],
-                copyright_holder=copyright_holder,
-                description=description,
-            )
-        elif node.license is not None:
-            if copyright_holder is not None:
-                node.license.copyright_holder = copyright_holder
-            if description is not None:
-                node.license.description = description
+        existing = node.license
+
+        def pick(key, attr):
+            value = metadata[key] if key in present else None
+            if value is None and existing is not None:
+                value = getattr(existing, attr)
+            return value
+
+        # LOM may name a holder/description without refining the license type;
+        # keep the node's current type in that case.
+        license_id = pick("license", "license_id")
+        if license_id is None:
+            return
+        node.set_license(
+            license_id,
+            copyright_holder=pick("copyright_holder", "copyright_holder"),
+            description=pick("license_description", "description"),
+        )
 
     def _process_uri(self):
         try:
@@ -1082,9 +1085,9 @@ class ContentNode(TreeNode):
             )
             for child_dict in node_dict.get("children") or []:
                 topic.add_child(self._build_descendant(child_dict))
-            self._apply_content_metadata(
-                topic, node_dict, skip=frozenset({"source_id", "title"})
-            )
+            # Topics carry no license: attaching one from a folder's LOM rights
+            # would fail validation whenever it needs a copyright holder.
+            self._apply_content_metadata(topic, node_dict, skip=self._TOPIC_SKIP_KEYS)
             return topic
         node = ContentNode(
             source_id=node_dict["source_id"],

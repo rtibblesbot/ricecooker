@@ -11,11 +11,13 @@ import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from abc import abstractmethod
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import field
 from typing import Dict
 from typing import Optional
 from typing import Union
+from urllib.parse import unquote
 from xml.etree import ElementTree
 
 import filetype
@@ -43,11 +45,14 @@ from ricecooker.utils.paths import extract_path_ext
 from ricecooker.utils.pipeline.context import ContentNodeMetadata
 from ricecooker.utils.pipeline.context import ContextMetadata
 from ricecooker.utils.pipeline.context import FileMetadata
+from ricecooker.utils.pipeline.exceptions import ExpectedFileException
 from ricecooker.utils.pipeline.exceptions import InvalidFileException
 from ricecooker.utils.pipeline.scorm import has_assessment_semantics
 from ricecooker.utils.pipeline.scorm import single_media_member
 from ricecooker.utils.pipeline.scorm import strip_scorm_boilerplate
 from ricecooker.utils.references import DEFAULT_MAPPERS
+from ricecooker.utils.references import is_data_uri
+from ricecooker.utils.references import is_external_url
 from ricecooker.utils.references import ReferenceMapper
 from ricecooker.utils.references import sanitize_style_css
 from ricecooker.utils.references import strip_scripts
@@ -875,8 +880,12 @@ def _summarize_leaf(sub):
     return None, files, None
 
 
-def _contained_path(root, member):
-    """Resolve ``member`` under ``root``; return the path, or None if it escapes.
+# The IMS Content Package manifest, always at the root of the package.
+_IMSCP_MANIFEST = "imsmanifest.xml"
+
+
+class _Package:
+    """One extracted IMSCP package, staging its resources into per-leaf directories.
 
     A resource's ``<file>`` list is its declared extent, but packages routinely
     under-declare it — shared stylesheets, scripts and images are often left
@@ -965,16 +974,21 @@ class IMSCPConversionHandler(ExtensionMatchingHandler):
             return False
         try:
             with zipfile.ZipFile(path) as zf:
-                return "imsmanifest.xml" in zf.namelist()
-        except (ValueError, zipfile.BadZipFile):
+                return _IMSCP_MANIFEST in zf.namelist()
+        except (OSError, zipfile.BadZipFile):
             return False
 
     def handle_file(self, path, audio_settings=None, video_settings=None):
         with tempfile.TemporaryDirectory() as temp_dir:
             with zipfile.ZipFile(path) as zf:
                 zf.extractall(temp_dir)
-            manifest = parse_imscp_manifest(temp_dir)
-            children = self._build_nodes(manifest.get("children"), temp_dir)
+            try:
+                manifest = parse_imscp_manifest(temp_dir)
+            except ET.ParseError as e:
+                raise InvalidFileException(
+                    f"File {path} is not a valid IMSCP package, its {_IMSCP_MANIFEST} could not be parsed: {e}"
+                )
+            children = self._build_nodes(manifest.get("children"), _Package(temp_dir))
         # Package-level LOM metadata (tags, description, licence, …) rides on the
         # topmost node; identity keys stay off so they cannot clash with the
         # explicit constructor args below.
@@ -1044,24 +1058,11 @@ class IMSCPConversionHandler(ExtensionMatchingHandler):
             )
             return None
 
-        members = node_dict.get("files") or []
-        if has_assessment_semantics(index_html, members, node_dict):
+        if has_assessment_semantics(index_html, node_dict.get("masteryscore")):
             LOGGER.warning("IMSCP: rejecting assessment resource %s", source_id)
             return None
 
-        media = single_media_member({**node_dict, "index_html": index_html})
-        if media:
-            media_path = _contained_path(temp_dir, media)
-            if media_path is None:
-                LOGGER.warning(
-                    "IMSCP: skipping resource %s, media path escapes package: %s",
-                    source_id,
-                    media,
-                )
-                return None
-            sub = self.get_pipeline().execute(media_path)
-        else:
-            sub = self._process_html5_leaf(node_dict, temp_dir)
+        sub = self._process_leaf(node_dict, package, index_html)
         if not sub:
             LOGGER.warning("IMSCP: skipping resource %s, produced no files", source_id)
             return None
@@ -1079,7 +1080,39 @@ class IMSCPConversionHandler(ExtensionMatchingHandler):
         merge_lom_fields(leaf, fields)
         return leaf
 
-    def _process_html5_leaf(self, node_dict, temp_dir):
+    def _process_leaf(self, node_dict, package, index_html):
+        """Run the resource up the ladder and return its sub-pipeline result.
+
+        A resource that reduces to a single wrapped media file is processed as
+        that file; everything else is sealed into its own HTML5 zip (which the
+        HTML5 handler may in turn promote to a KPUB). Returns ``None`` when the
+        resource cannot be processed — one unusable resource (an entry that is
+        not well-formed HTML, an unreadable media file) drops just that leaf and
+        leaves the rest of the package to decompose.
+        """
+        source_id = node_dict.get("source_id")
+        media = single_media_member(
+            index_html, node_dict["index_file"], node_dict.get("files") or []
+        )
+        media_path = contained_path(package.directory, media) if media else None
+        if media and media_path is None:
+            LOGGER.warning(
+                "IMSCP: skipping resource %s, media path escapes package: %s",
+                source_id,
+                media,
+            )
+            return None
+        try:
+            if media_path:
+                return self.get_pipeline().execute(media_path)
+            return self._process_html5_leaf(node_dict, package)
+        except (InvalidFileException, ExpectedFileException) as e:
+            LOGGER.warning(
+                "IMSCP: skipping resource %s, could not process: %s", source_id, e
+            )
+            return None
+
+    def _process_html5_leaf(self, node_dict, package):
         """Seal the resource's own members into a zip and process it as HTML5/KPUB."""
         index_file = node_dict["index_file"]
         with tempfile.TemporaryDirectory() as staging:
@@ -1097,24 +1130,6 @@ class IMSCPConversionHandler(ExtensionMatchingHandler):
             return self.get_pipeline().execute(zip_path)
         finally:
             os.unlink(zip_path)
-
-    def _stage_leaf(self, node_dict, temp_dir, dest_dir):
-        """Copy the resource's members into ``dest_dir`` (relative paths preserved),
-        guaranteeing a root ``index.html`` entry."""
-        for member in node_dict.get("files") or []:
-            # Guard against a manifest path escaping the package (read side) or
-            # the staging dir (write side).
-            src = _contained_path(temp_dir, member)
-            dst = _contained_path(dest_dir, member)
-            if src is None or dst is None or not os.path.isfile(src):
-                continue
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copyfile(src, dst)
-        index_dst = os.path.join(dest_dir, "index.html")
-        if not os.path.isfile(index_dst):
-            index_src = _contained_path(temp_dir, node_dict["index_file"])
-            if index_src and os.path.isfile(index_src):
-                shutil.copyfile(index_src, index_dst)
 
 
 class ConversionStageHandler(StageHandler):

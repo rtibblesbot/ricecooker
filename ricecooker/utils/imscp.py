@@ -81,9 +81,11 @@ def _read_manifest(manifest_path):
         # real encoding, decode, and re-parse from re-encoded UTF-8 bytes.
         with open(manifest_path, "rb") as f:
             data = f.read()
-        info = chardet.detect(data)
-        data = data.decode(info["encoding"])
-        return ET.parse(io.BytesIO(data.encode("utf-8"))).getroot()
+        encoding = chardet.detect(data)["encoding"]
+        if encoding is None:
+            # Nothing to re-decode from; the manifest is simply not parseable.
+            raise
+        return ET.parse(io.BytesIO(data.decode(encoding).encode("utf-8"))).getroot()
 
 
 def _strip_ns(key):

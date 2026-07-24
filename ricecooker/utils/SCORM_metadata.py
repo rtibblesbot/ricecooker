@@ -2,6 +2,7 @@
 le_utils content-node fields. Ported from ricecooker PR #468.
 """
 
+import logging
 import re
 
 from le_utils.constants import licenses
@@ -10,6 +11,13 @@ from le_utils.constants.labels import needs
 from le_utils.constants.labels import resource_type
 
 from ricecooker.utils.youtube import get_language_with_alpha2_fallback
+
+LOGGER = logging.getLogger(__name__)
+
+# Tags longer than this are rejected by node validation (``Node._validate``), and
+# LOM keywords are routinely whole phrases, so over-long ones are dropped rather
+# than allowed to fail the whole channel.
+MAX_TAG_LENGTH = 30
 
 # LOM sections and the fields the parser lifts out of each. Keyed by the LOM
 # ``<general>``/``<rights>``/``<educational>``/``<lifeCycle>`` element name.
@@ -206,12 +214,16 @@ def _normalize_language(lang_code):
 
 
 def _normalize_keywords(keyword):
-    """Normalize the keyword field to a list, or None if empty."""
-    if not keyword:
-        return None
-    if isinstance(keyword, str):
-        return [keyword]
-    return keyword
+    """Normalize the keyword field to a list of usable tags, or None if empty."""
+    keywords = _ensure_list(keyword)
+    tags = [k for k in keywords if k and len(k) <= MAX_TAG_LENGTH]
+    for dropped in [k for k in keywords if k and len(k) > MAX_TAG_LENGTH]:
+        LOGGER.warning(
+            "SCORM: dropping keyword longer than %s characters: %s",
+            MAX_TAG_LENGTH,
+            dropped,
+        )
+    return tags or None
 
 
 def metadata_dict_to_content_node_fields(metadata_dict):

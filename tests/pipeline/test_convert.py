@@ -854,17 +854,19 @@ class TestSCORMClassifiers:
         from ricecooker.utils.pipeline.scorm import has_assessment_semantics
 
         html = "<html><body><script>var JQuiz={};</script></body></html>"
-        assert has_assessment_semantics(html, ["quiz.htm"], {})
+        assert has_assessment_semantics(html, {})
 
     def test_assessment_cmi_score_write(self):
         from ricecooker.utils.pipeline.scorm import has_assessment_semantics
 
+        # Writing a score necessarily calls the LMS API that is otherwise
+        # discounted as plumbing; recording a grade still means assessment.
         html = (
             "<html><body>"
-            '<script>doLMSSetValue("cmi.core.score.raw", 80);</script>'
+            '<script>LMSSetValue("cmi.core.score.raw", 80);</script>'
             "</body></html>"
         )
-        assert has_assessment_semantics(html, ["page.htm"], {})
+        assert has_assessment_semantics(html)
 
     def test_no_assessment_for_pure_boilerplate(self):
         from ricecooker.utils.pipeline.scorm import has_assessment_semantics
@@ -874,9 +876,7 @@ class TestSCORMClassifiers:
             '<script src="SCORM_API_wrapper.js"></script>'
             '<script src="SCOFunctions.js"></script></body></html>'
         )
-        assert not has_assessment_semantics(
-            html, ["SCORM_API_wrapper.js", "SCOFunctions.js"], {}
-        )
+        assert not has_assessment_semantics(html)
 
     def test_no_assessment_for_boilerplate_lesson_status(self):
         from ricecooker.utils.pipeline.scorm import has_assessment_semantics
@@ -889,7 +889,7 @@ class TestSCORMClassifiers:
             '<script>pipwerks.SCORM.set("cmi.core.lesson_status", "completed");</script>'
             "</body></html>"
         )
-        assert not has_assessment_semantics(html, [], {})
+        assert not has_assessment_semantics(html)
 
     def test_assessment_from_masteryscore(self):
         from ricecooker.utils.pipeline.scorm import has_assessment_semantics
@@ -1116,6 +1116,19 @@ class TestIMSCPDecomposition:
         assert len(leaves) > 1
         assert all(leaf["kind"] == content_kinds.HTML5 for leaf in leaves)
         assert all(leaf["title"].strip() for leaf in leaves)
+
+        # gitta's resources declare no <file> members at all and their entry
+        # points sit deep in the package, so a leaf sealed from the manifest
+        # alone would be an unstyled orphan page. The assets each entry
+        # references are staged with it, and the entry is recorded for Kolibri.
+        leaf = leaves[0]
+        entry = leaf["extra_fields"]["options"]["entry"]
+        assert entry.endswith(".html") and "/" in entry
+        with zipfile.ZipFile(leaf["files"][0]["path"]) as zf:
+            names = zf.namelist()
+        assert entry in names
+        assert any(n.endswith(".css") for n in names)
+        assert any(n.endswith((".gif", ".png", ".jpg")) for n in names)
 
     def test_synthetic_wrapped_media_becomes_video_node(self, video_file):
         with open(video_file.path, "rb") as fh:

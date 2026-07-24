@@ -34,10 +34,12 @@ SCORM_API_CALL_RE = re.compile(
     r"Initialize|Terminate|Commit|GetValue|SetValue)\b"
 )
 
-# Data-model elements that only appear when a resource records a grade/progress.
-SCORM_SCORE_RE = re.compile(
-    r"cmi\.core\.score|cmi\.score|cmi\.core\.lesson_status", re.IGNORECASE
-)
+# Recording a grade is assessment meaning whatever else the script does.
+SCORM_SCORE_RE = re.compile(r"cmi\.core\.score|cmi\.score", re.IGNORECASE)
+
+# Reporting a lesson status is only a signal outside SCORM plumbing: a plain
+# content SCO reports completion on unload as part of that plumbing.
+SCORM_STATUS_RE = re.compile(r"cmi\.core\.lesson_status", re.IGNORECASE)
 
 # HotPotatoes quiz engine globals. Their presence means the page IS an exercise.
 _HOTPOTATOES_GLOBALS_RE = re.compile(r"JQuiz|JCloze|JMatch|JMix|JCross", re.IGNORECASE)
@@ -83,6 +85,12 @@ def _is_boilerplate_script(attrs, body):
     return bool(SCORM_API_CALL_RE.search(body))
 
 
+def _iter_scripts(html):
+    """Yield ``(attrs, body)`` for every ``<script>`` element in ``html``."""
+    for match in _SCRIPT_TAG_RE.finditer(html):
+        yield match.group(1), match.group(2)
+
+
 def strip_scorm_boilerplate(html):
     """Return ``html`` with SCORM API boilerplate ``<script>`` tags removed.
 
@@ -102,13 +110,14 @@ def _is_boilerplate_member(name):
     return name.lower().endswith(".js") and _is_boilerplate_src(name)
 
 
-def has_assessment_semantics(index_html, member_names, item):
+def has_assessment_semantics(index_html, mastery_score=None):
     """True when a webcontent resource carries assessment/score/tracking meaning.
 
     Signals (any one is enough): a HotPotatoes-generated page, an
-    ``adlcp:masteryscore``, or non-boilerplate script writing a SCORM
-    score/status. Boilerplate is discounted first so a plain SCO that merely
-    talks to the LMS is not mistaken for an exercise.
+    ``adlcp:masteryscore``, an inline script writing a SCORM score, or a
+    non-boilerplate script writing a lesson status. Boilerplate is discounted for
+    the status signal so a plain SCO that merely talks to the LMS is not mistaken
+    for an exercise.
     """
     lower = index_html.lower()
     if "hot potatoes" in lower:
@@ -117,11 +126,19 @@ def has_assessment_semantics(index_html, member_names, item):
         return True
     if mastery_score:
         return True
-    # Discount SCORM API boilerplate before grepping for a score/status write:
-    # a plain content SCO reports cmi.core.lesson_status on unload as part of that
-    # plumbing, and must not be mistaken for an exercise. Only the index's own
-    # scripts are inspected — wrapper .js members reference cmi.* as API surface.
-    return bool(SCORM_SCORE_RE.search(strip_scorm_boilerplate(index_html)))
+    # Only the index's own inline scripts are inspected — wrapper .js members
+    # reference cmi.* as API surface, not as a graded resource's own behaviour.
+    for attrs, body in _iter_scripts(index_html):
+        if _script_src(attrs) is not None:
+            continue
+        # A score write means the resource records a grade, even though writing it
+        # necessarily calls the LMS API that would otherwise read as plumbing.
+        if SCORM_SCORE_RE.search(body):
+            return True
+        # A lesson-status write only counts outside that plumbing.
+        if not _is_boilerplate_script(attrs, body) and SCORM_STATUS_RE.search(body):
+            return True
+    return False
 
 
 def _references(tag, media_name):
