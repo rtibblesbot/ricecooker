@@ -34,6 +34,10 @@ from ricecooker.exceptions import UnknownFileTypeError
 from ricecooker.utils.audio import AudioCompressionError
 from ricecooker.utils.audio import compress_audio
 from ricecooker.utils.caching import generate_key
+from ricecooker.utils.imscp import contained_path
+from ricecooker.utils.imscp import is_qti_resource
+from ricecooker.utils.imscp import lom_content_fields
+from ricecooker.utils.imscp import merge_lom_fields
 from ricecooker.utils.imscp import parse_imscp_manifest
 from ricecooker.utils.paths import extract_path_ext
 from ricecooker.utils.pipeline.context import ContentNodeMetadata
@@ -990,6 +994,10 @@ class IMSCPConversionHandler(ExtensionMatchingHandler):
 
     def _build_leaf(self, node_dict, package):
         source_id = node_dict.get("source_id")
+        # QTI ingestion is deferred to #337, so assessment items are rejected here.
+        if is_qti_resource(node_dict.get("type")):
+            LOGGER.warning("IMSCP: rejecting QTI resource %s", source_id)
+            return None
         if node_dict.get("type") != "webcontent" or not node_dict.get("index_file"):
             LOGGER.warning(
                 "IMSCP: skipping unsupported resource %s (type=%s)",

@@ -1,6 +1,8 @@
 import os
 import zipfile
 
+from ricecooker.utils.imscp import flatten_single_child_topics
+from ricecooker.utils.imscp import is_qti_resource
 from ricecooker.utils.imscp import parse_imscp_manifest
 
 FIXTURE_DIR = os.path.join(
@@ -73,8 +75,11 @@ def test_parse_eventos_nested_tree(tmp_path):
     ims_dir = _extract("eventos.zip", tmp_path)
     manifest = parse_imscp_manifest(ims_dir)
 
-    org = manifest["children"][0]
-    assert org["title"] == "Evento's Solutions, servicios integrales (ESSI)"
+    # The organization wraps a single content-root topic; flattening collapses
+    # that redundant level so the content root sits directly under the manifest.
+    root_topic = manifest["children"][0]
+    assert root_topic["title"] == "Evento's Solutions, servicios integrales (ESSI)"
+    assert all(child.get("children") is None for child in root_topic["children"])
 
     leaves = list(_manifest_leaves(manifest))
     assert len(leaves) > 1
@@ -159,6 +164,69 @@ def test_masteryscore_element_surfaced(tmp_path):
         item_body="<adlcp:masteryscore>80</adlcp:masteryscore>",
     )
     assert leaf["masteryscore"] == "80"
+
+
+def test_is_qti_resource():
+    # QTI resources are identified by the spec's ``imsqti_`` type prefix.
+    assert is_qti_resource("imsqti_xmlv1p2")
+    assert is_qti_resource("imsqti_test_xmlv1p2")
+    assert not is_qti_resource("webcontent")
+    assert not is_qti_resource("")
+    assert not is_qti_resource(None)
+
+
+def test_qti_resource_files_derived(tmp_path):
+    # A QTI resource is parsed like webcontent (files/index derived) so the
+    # decomposer can reject it intentionally rather than silently skip it.
+    leaf = _parse_leaf(
+        tmp_path,
+        '<resource identifier="RES" type="imsqti_xmlv1p2" href="q.xml">'
+        '<file href="q.xml"/></resource>',
+    )
+    assert is_qti_resource(leaf["type"])
+    assert leaf["files"] == ["q.xml"]
+
+
+def test_flatten_single_child_topics():
+    # A topic whose sole child is another topic collapses; the child keeps its
+    # own title. Leaf-only and multi-child topics are left untouched.
+    tree = {
+        "source_id": "org",
+        "title": "Organization",
+        "children": [
+            {
+                "source_id": "root",
+                "title": "Content Root",
+                "children": [
+                    {"source_id": "a", "title": "A"},
+                    {"source_id": "b", "title": "B"},
+                ],
+            }
+        ],
+    }
+    flat = flatten_single_child_topics(tree)
+    assert flat["source_id"] == "root"
+    assert flat["title"] == "Content Root"
+    assert [c["source_id"] for c in flat["children"]] == ["a", "b"]
+
+
+def test_flatten_keeps_leaf_only_topic(tmp_path):
+    # test_quiz's organization holds a single *leaf* (not a topic), so the
+    # organization level must be preserved, not collapsed onto the leaf.
+    ims_dir = _extract("test_quiz.zip", tmp_path)
+    manifest = parse_imscp_manifest(ims_dir)
+    org = manifest["children"][0]
+    assert org["title"] == "Organization"
+    assert len(org["children"]) == 1
+    assert org["children"][0].get("children") is None
+
+
+def test_dangling_reference_dropped(tmp_path):
+    # An item pointing at a missing resource is left without files rather than
+    # crashing; the tree still parses.
+    leaf = _parse_leaf(tmp_path, "", identifierref="MISSING")
+    assert "files" not in leaf
+    assert leaf["source_id"] == "IT"
 
 
 def test_cyclic_dependency_does_not_recurse_forever(tmp_path):
