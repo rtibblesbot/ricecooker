@@ -16,11 +16,16 @@ import requests
 from bs4 import BeautifulSoup
 from le_utils.constants import content_kinds
 from le_utils.constants import format_presets
+from le_utils.constants import licenses
+from le_utils.constants.labels import learning_activities
+from le_utils.constants.labels import resource_type
 
 from ricecooker import config
 from ricecooker.classes.files import EPubFile
 from ricecooker.classes.files import H5PFile
 from ricecooker.classes.files import HTMLZipFile
+from ricecooker.classes.licenses import get_license
+from ricecooker.classes.nodes import ContentNode
 from ricecooker.utils import archive_assets
 from ricecooker.utils.pipeline import FilePipeline
 from ricecooker.utils.pipeline.context import ContentNodeMetadata
@@ -34,6 +39,9 @@ from ricecooker.utils.pipeline.convert import HTML5ConversionHandler
 from ricecooker.utils.pipeline.convert import KPUBConversionHandler
 from ricecooker.utils.pipeline.convert import PandocMissingError
 from ricecooker.utils.pipeline.exceptions import InvalidFileException
+from ricecooker.utils.pipeline.scorm import has_assessment_semantics
+from ricecooker.utils.pipeline.scorm import single_media_member
+from ricecooker.utils.pipeline.scorm import strip_scorm_boilerplate
 from ricecooker.utils.references import DEFAULT_MAPPERS
 
 # A valid 1x1 PNG, small enough to inline but real enough to pass the CONVERT
@@ -826,8 +834,6 @@ class TestSCORMClassifiers:
     """SCORM-boilerplate discount + assessment / single-media classifiers."""
 
     def test_strip_scorm_boilerplate(self):
-        from ricecooker.utils.pipeline.scorm import strip_scorm_boilerplate
-
         html = (
             "<html><body>"
             '<script src="SCORM_API_wrapper.js"></script>'
@@ -842,8 +848,6 @@ class TestSCORMClassifiers:
         assert "<p>content</p>" in residual
 
     def test_assessment_hotpotatoes_generator(self):
-        from ricecooker.utils.pipeline.scorm import has_assessment_semantics
-
         html = (
             '<html><head><meta name="generator" content="Hot Potatoes 7"></head>'
             "<body><p>Q1</p></body></html>"
@@ -851,14 +855,10 @@ class TestSCORMClassifiers:
         assert has_assessment_semantics(html)
 
     def test_assessment_hotpotatoes_global(self):
-        from ricecooker.utils.pipeline.scorm import has_assessment_semantics
-
         html = "<html><body><script>var JQuiz={};</script></body></html>"
-        assert has_assessment_semantics(html, {})
+        assert has_assessment_semantics(html)
 
     def test_assessment_cmi_score_write(self):
-        from ricecooker.utils.pipeline.scorm import has_assessment_semantics
-
         # Writing a score necessarily calls the LMS API that is otherwise
         # discounted as plumbing; recording a grade still means assessment.
         html = (
@@ -869,8 +869,6 @@ class TestSCORMClassifiers:
         assert has_assessment_semantics(html)
 
     def test_no_assessment_for_pure_boilerplate(self):
-        from ricecooker.utils.pipeline.scorm import has_assessment_semantics
-
         html = (
             "<html><body><p>An eXe article page.</p>"
             '<script src="SCORM_API_wrapper.js"></script>'
@@ -879,8 +877,6 @@ class TestSCORMClassifiers:
         assert not has_assessment_semantics(html)
 
     def test_no_assessment_for_boilerplate_lesson_status(self):
-        from ricecooker.utils.pipeline.scorm import has_assessment_semantics
-
         # A content SCO reporting completion via inline SCORM plumbing is not an
         # exercise: the boilerplate is discounted before the score grep, so the
         # lesson_status write does not read as assessment (and the page is kept).
@@ -892,21 +888,14 @@ class TestSCORMClassifiers:
         assert not has_assessment_semantics(html)
 
     def test_assessment_from_masteryscore(self):
-        from ricecooker.utils.pipeline.scorm import has_assessment_semantics
-
         # A mastery score on the item is an assessment signal on its own.
         html = "<html><body><p>Quiz</p></body></html>"
         assert has_assessment_semantics(html, mastery_score="80")
 
     def test_single_media_member_returns_media(self):
-        from ricecooker.utils.pipeline.scorm import single_media_member
-
-        leaf = {
-            "index_file": "index.html",
-            "files": ["index.html", "video.mp4"],
-            "index_html": '<html><body><video src="video.mp4"></video></body></html>',
-        }
-        assert single_media_member(leaf) == "video.mp4"
+        html = '<html><body><video src="video.mp4"></video></body></html>'
+        files = ["index.html", "video.mp4"]
+        assert single_media_member(html, "index.html", files) == "video.mp4"
 
     def test_single_media_member_none_with_stylesheet(self):
         html = '<html><body><video src="video.mp4"></video></body></html>'
@@ -914,25 +903,15 @@ class TestSCORMClassifiers:
         assert single_media_member(html, "index.html", files) is None
 
     def test_single_media_member_none_with_two_media(self):
-        from ricecooker.utils.pipeline.scorm import single_media_member
-
-        leaf = {
-            "index_file": "index.html",
-            "files": ["index.html", "a.mp4", "b.mp4"],
-            "index_html": '<html><body><video src="a.mp4"></video></body></html>',
-        }
-        assert single_media_member(leaf) is None
+        html = '<html><body><video src="a.mp4"></video></body></html>'
+        files = ["index.html", "a.mp4", "b.mp4"]
+        assert single_media_member(html, "index.html", files) is None
 
     def test_single_media_member_ignores_boilerplate(self):
-        from ricecooker.utils.pipeline.scorm import single_media_member
-
         # A lone media file next to a discounted SCORM wrapper still qualifies.
-        leaf = {
-            "index_file": "index.html",
-            "files": ["index.html", "clip.mp4", "SCORM_API_wrapper.js"],
-            "index_html": '<html><body><video src="clip.mp4"></video></body></html>',
-        }
-        assert single_media_member(leaf) == "clip.mp4"
+        html = '<html><body><video src="clip.mp4"></video></body></html>'
+        files = ["index.html", "clip.mp4", "SCORM_API_wrapper.js"]
+        assert single_media_member(html, "index.html", files) == "clip.mp4"
 
 
 class TestKPUBPromotion:
@@ -993,19 +972,27 @@ class TestKPUBPromotion:
         )
         assert result[0].preset == format_presets.HTML5_ZIP
 
-    def test_kpub_disqualifiers_refactor_preserves_validation(self):
-        # The refactored KPUBConversionHandler still rejects a JS-bearing archive.
+    def test_downloaded_external_css_blocks_promotion(self):
+        # The zip ships no .css member, but reference resolution downloads the
+        # externally-referenced stylesheet into the archive. Judging KPUB criteria
+        # before that ran would seal a .kpub containing CSS.
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "test.kpub")
+            path = os.path.join(tmpdir, "test.zip")
             _create_archive(
                 path,
                 {
-                    "index.html": "<html><body><p>Hi</p></body></html>",
-                    "script.js": "x()",
-                },
+                    "index.html": (
+                        "<html><head>"
+                        "<link rel='stylesheet' href='https://ex.com/s.css'>"
+                        "</head><body><p>Prose</p></body></html>"
+                    )
+                }
             )
-            with pytest.raises(InvalidFileException, match="(?i)javascript"):
-                KPUBConversionHandler().validate_archive(path)
+            with _fake_download_session({"https://ex.com/s.css": b"p{color:red}"}):
+                result = FilePipeline().execute(path, skip_cache=True)
+        assert result[0].preset == format_presets.HTML5_ZIP
+        with zipfile.ZipFile(result[0].path) as zf:
+            assert any(n.endswith(".css") for n in zf.namelist())
 
 
 _IMSCP_FIXTURE_DIR = os.path.join(
@@ -1167,13 +1154,28 @@ class TestIMSCPDecomposition:
         assert leaves[0]["kind"] == content_kinds.DOCUMENT
         assert any(f["preset"] == format_presets.KPUB_ZIP for f in leaves[0]["files"])
 
+    def test_wrapped_image_stays_an_article(self):
+        # Kolibri has no image content kind, so a page wrapping a single picture
+        # must not be promoted to a media node — it would yield a kind-less leaf,
+        # which the tree expander cannot tell apart from an empty folder.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "image.zip")
+            _build_single_resource_imscp(
+                path,
+                "page.html",
+                "<html><body><img src='pic.png'></body></html>",
+                {"pic.png": _PNG_1x1},
+            )
+            tree = (
+                FilePipeline().execute(path, skip_cache=True)[0].content_node_metadata
+            )
+        leaves = list(_tree_dict_leaves(tree))
+        assert len(leaves) == 1
+        assert leaves[0]["kind"] == content_kinds.DOCUMENT
+
     def test_leaf_carries_mapped_lom_metadata(self):
         # LOM educational/rights/general/lifeCycle metadata on a resource maps
         # onto the decomposed leaf's content-node fields.
-        from le_utils.constants import licenses
-        from le_utils.constants.labels import learning_activities
-        from le_utils.constants.labels import resource_type
-
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "meta.zip")
             _build_metadata_imscp(path)
@@ -1191,12 +1193,6 @@ class TestIMSCPDecomposition:
     def test_node_expansion_applies_lom_metadata(self):
         # Through the real consumer: the mapped licence is rebuilt via set_license
         # (overriding the package default) and the label fields land on the node.
-        from le_utils.constants import licenses
-        from le_utils.constants.labels import learning_activities
-
-        from ricecooker.classes.licenses import get_license
-        from ricecooker.classes.nodes import ContentNode
-
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "meta.zip")
             _build_metadata_imscp(path)

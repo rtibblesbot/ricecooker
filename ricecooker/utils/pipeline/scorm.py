@@ -44,17 +44,24 @@ SCORM_STATUS_RE = re.compile(r"cmi\.core\.lesson_status", re.IGNORECASE)
 # HotPotatoes quiz engine globals. Their presence means the page IS an exercise.
 _HOTPOTATOES_GLOBALS_RE = re.compile(r"JQuiz|JCloze|JMatch|JMix|JCross", re.IGNORECASE)
 
+# HotPotatoes stamps itself into a <meta> tag ("Created with Hot Potatoes ..."),
+# so only meta content is searched for the name — matching it anywhere in the
+# document would reject any page that merely writes about hot potatoes.
+_HOTPOTATOES_META_RE = re.compile(
+    r"<meta\b[^>]*\bcontent\s*=\s*[\"'][^\"']*hot\s+potatoes", re.IGNORECASE
+)
+
 _MEDIA_TAGS = ("video", "audio", "img", "embed", "iframe")
 
+# Only formats that map to a Kolibri content kind of their own. Images are
+# deliberately absent: Kolibri has no image kind, so a page wrapping a single
+# picture is better served as the (static, KPUB-qualifying) article it already is
+# than collapsed to a media node that could not exist.
 MEDIA_EXTENSIONS = {
     file_formats.MP4,
     file_formats.WEBM,
     file_formats.MP3,
     file_formats.PDF,
-    file_formats.PNG,
-    file_formats.JPG,
-    file_formats.JPEG,
-    file_formats.GIF,
 }
 
 # One ``<script ...>...</script>`` element; group 1 = attributes, group 2 = body.
@@ -119,10 +126,9 @@ def has_assessment_semantics(index_html, mastery_score=None):
     the status signal so a plain SCO that merely talks to the LMS is not mistaken
     for an exercise.
     """
-    lower = index_html.lower()
-    if "hot potatoes" in lower:
+    if _HOTPOTATOES_META_RE.search(index_html):
         return True
-    if any(g.lower() in lower for g in HOTPOTATOES_GLOBALS):
+    if _HOTPOTATOES_GLOBALS_RE.search(index_html):
         return True
     if mastery_score:
         return True

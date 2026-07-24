@@ -332,109 +332,108 @@ class ArchiveProcessingBaseHandler(ExtensionMatchingHandler):
                 f"File {zf.filename} is not a valid {self.FILE_TYPE} file, {filepath} is missing."
             )
 
-    def _validate_index_html_body(self, zf, path, index_path="index.html"):
-        """Validate that the entry HTML exists and has a non-empty body."""
-        index_html = self.read_file_from_archive(zf, index_path)
-        try:
-            dom = html5lib.parse(index_html, namespaceHTMLElements=False)
-            body = dom.find("body")
-            if body is None:
-                raise InvalidFileException(
-                    f"File {path} is not a valid {self.FILE_TYPE} file, {index_path} is missing a body element."
-                )
-            # Check that the body has at least one child element
-            # for some reason it seems like comments don't get a string tag attribute
-            body_children = [
-                c for c in body.iter() if isinstance(c.tag, str) and c.tag != "body"
-            ]
-            if not (body.text and body.text.strip()) and not body_children:
-                raise InvalidFileException(
-                    f"File {path} is not a valid {self.FILE_TYPE} file, {index_path} is empty."
-                )
-            return dom
-        except ParseError:
-            raise InvalidFileException(
-                f"File {path} is not a valid {self.FILE_TYPE} file, {index_path} is not well-formed."
-            )
+
+def _empty_body_reason(dom, entry):
+    """Why ``dom`` has no usable body, or None when it has one."""
+    body = dom.find("body")
+    if body is None:
+        return f"{entry} is missing a body element."
+    # For some reason it seems like comments don't get a string tag attribute.
+    body_children = [
+        c for c in body.iter() if isinstance(c.tag, str) and c.tag != "body"
+    ]
+    if not (body.text and body.text.strip()) and not body_children:
+        return f"{entry} is empty."
+    return None
 
 
-def kpub_disqualifiers(zf, entry="index.html", index_html=None):
-    """Return the reasons ``zf`` fails the KPUB criteria; empty list ⇒ it qualifies.
+def _disqualifying_member_reason(names):
+    """Why an archive's members bar it from being a KPUB, or None when they do not."""
+    if any(n.lower().endswith(".js") for n in names):
+        return "JavaScript files (.js) are not allowed."
+    if any(n.lower().endswith(".css") for n in names):
+        return "external CSS files (.css) are not allowed."
+    return None
 
-    A KPUB is static prose: it must have a non-empty ``entry`` body and carry no
-    inline ``<script>``, ``.js`` member, or ``.css`` member. ``index_html`` lets a
-    caller judge already-transformed markup (e.g. SCORM boilerplate discounted)
-    while the physical member checks still run against ``zf``.
+
+def _kpub_disqualifier(names, index_html, entry="index.html"):
+    """The first reason a KPUB candidate fails the criteria; None ⇒ it qualifies.
+
+    ``names`` are the member paths of the archive (or extracted directory) and
+    ``index_html`` the entry document's markup, ``None`` when it is missing.
+    Taking the markup separately lets a caller judge already-transformed content
+    (e.g. with SCORM boilerplate discounted) while the member checks still run
+    over what will actually be shipped.
+
+    A KPUB is static prose: a non-empty ``entry`` body, no inline ``<script>``,
+    and no ``.js`` or ``.css`` member.
     """
-    reasons = []
     if index_html is None:
-        try:
-            index_html = zf.read(entry)
-        except KeyError:
-            return [f"{entry} is missing."]
+        return f"{entry} is missing."
     if isinstance(index_html, bytes):
         index_html = index_html.decode("utf-8", errors="replace")
 
     try:
         dom = html5lib.parse(index_html, namespaceHTMLElements=False)
     except ParseError:
-        return [f"{entry} is not well-formed."]
-
-    body = dom.find("body")
-    if body is None:
-        reasons.append(f"{entry} is missing a body element.")
-    else:
-        body_children = [
-            c for c in body.iter() if isinstance(c.tag, str) and c.tag != "body"
-        ]
-        if not (body.text and body.text.strip()) and not body_children:
-            reasons.append(f"{entry} is empty.")
+        return f"{entry} is not well-formed."
 
     reason = _empty_body_reason(dom, entry)
     if reason:
         return reason
     if next(dom.iter("script"), None) is not None:
-        reasons.append("inline JavaScript (<script> tags) is not allowed.")
-
-    names = zf.namelist()
+        return "inline JavaScript (<script> tags) is not allowed."
     if any(n.lower().endswith(".js") for n in names):
-        reasons.append("JavaScript files (.js) are not allowed.")
+        return "JavaScript files (.js) are not allowed."
     if any(n.lower().endswith(".css") for n in names):
-        reasons.append("external CSS files (.css) are not allowed.")
+        return "external CSS files (.css) are not allowed."
+    return None
 
-    return reasons
+
+def _archive_member_names(directory):
+    """Every file name in ``directory``; only ever extension-tested, so not path-qualified."""
+    return [name for _, _, filenames in os.walk(directory) for name in filenames]
 
 
 class HTML5ConversionHandler(ArchiveProcessingBaseHandler):
     EXTENSIONS = {file_formats.HTML5}
     FILE_TYPE = "HTML5"
 
-    def _qualifies_as_kpub(self, path, entry):
-        """A static-article HTML5 zip is promoted to a KPUB; anything with scripts,
-        JS/CSS members, or a non-root entry stays an HTML5 zip."""
-        if entry != "index.html":
+    def _qualifies_as_kpub(self, temp_dir):
+        """A static-article HTML5 zip is promoted to a KPUB; anything with scripts
+        or JS/CSS members stays an HTML5 zip.
+
+        Judged over the *processed* directory: reference resolution downloads
+        externally-referenced stylesheets and scripts into it, and those count
+        against the criteria just as much as ones the archive shipped with.
+        """
+        names = _archive_member_names(temp_dir)
+        # A .js/.css member disqualifies whatever the markup says, so test that
+        # first and spare the majority of HTML5 zips the read and parse below.
+        if _disqualifying_member_reason(names):
             return False
-        with zipfile.ZipFile(path) as zf:
-            # Discount SCORM plumbing before judging inline scripts; the wrapper
-            # .js members it leaves behind still disqualify a genuine SCORM package.
-            discounted = strip_scorm_boilerplate(
-                zf.read(entry).decode("utf-8", errors="replace")
-            )
-            return not kpub_disqualifiers(zf, entry, index_html=discounted)
+        try:
+            with open(
+                os.path.join(temp_dir, "index.html"), encoding="utf-8", errors="replace"
+            ) as fh:
+                index_html = fh.read()
+        except OSError:
+            return False
+        # Discount SCORM plumbing before judging inline scripts; the wrapper
+        # .js members it leaves behind still disqualify a genuine SCORM package.
+        discounted = strip_scorm_boilerplate(index_html)
+        return _kpub_disqualifier(names, discounted) is None
+
+    def seal_ext(self, temp_dir, ext):
+        if not self._qualifies_as_kpub(temp_dir):
+            return ext
+        sanitize_kpub_directory(temp_dir)
+        return file_formats.HTML5_ARTICLE
 
     def handle_file(self, path, audio_settings=None, video_settings=None):
         prepared_path, entry = self._prepare_archive(path)
         try:
-            self.validate_archive(prepared_path)
-            promote = self._qualifies_as_kpub(prepared_path, entry)
-            with tempfile.TemporaryDirectory() as temp_dir:
-                with zipfile.ZipFile(prepared_path) as zf:
-                    zf.extractall(temp_dir)
-                self._process_archive_dir(temp_dir, audio_settings, video_settings)
-                if promote:
-                    sanitize_kpub_directory(temp_dir)
-                seal_ext = file_formats.HTML5_ARTICLE if promote else file_formats.HTML5
-                _seal_directory_to_file(self, temp_dir, seal_ext)
+            super().handle_file(prepared_path, audio_settings, video_settings)
         finally:
             if prepared_path != path and os.path.exists(prepared_path):
                 os.unlink(prepared_path)
@@ -626,10 +625,14 @@ class KPUBConversionHandler(ArchiveProcessingBaseHandler):
 
     def validate_archive(self, path: str):
         with self.open_and_verify_archive(path) as zf:
-            reasons = kpub_disqualifiers(zf)
-            if reasons:
+            try:
+                index_html = zf.read("index.html")
+            except KeyError:
+                index_html = None
+            reason = _kpub_disqualifier(zf.namelist(), index_html)
+            if reason:
                 raise InvalidFileException(
-                    f"File {path} is not a valid {self.FILE_TYPE} file, {reasons[0]}"
+                    f"File {path} is not a valid {self.FILE_TYPE} file, {reason}"
                 )
 
 
@@ -1068,7 +1071,17 @@ class IMSCPConversionHandler(ExtensionMatchingHandler):
             return None
 
         kind, files, extra_fields = _summarize_leaf(sub)
-        fields = _lom_content_fields(node_dict)
+        if kind is None:
+            # A leaf dict without a kind is indistinguishable from a topic to the
+            # tree expander, so it would silently become an empty folder. Drop it
+            # loudly instead.
+            LOGGER.warning(
+                "IMSCP: skipping resource %s, no content kind could be inferred",
+                source_id,
+            )
+            return None
+
+        fields = lom_content_fields(node_dict)
         leaf = {
             "source_id": source_id,
             "title": node_dict.get("title") or fields.get("title") or source_id,
