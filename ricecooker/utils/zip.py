@@ -60,16 +60,16 @@ def find_html_entrypoint(names):
 
 def _assert_reference_zlib():
     """
-    Predictable zips must be produced by the reference zlib implementation.
+    Refuse to build predictable zips on interpreters linked against zlib-ng.
 
-    The byte layout of these archives is pinned both here and in Kolibri Studio's
-    JavaScript implementation, and their MD5s are already in use for deduplication,
-    so the compressed bytes cannot change. zlib-ng emits different DEFLATE output
-    from zlib for the same input at every compression level and strategy, so an
-    interpreter linked against it cannot reproduce those hashes. CPython 3.14 on
-    Windows ships zlib-ng; it exposes ``zlib.ZLIBNG_VERSION`` when it does.
+    zlib-ng emits different DEFLATE bytes than zlib at every level and strategy, and
+    predictable-zip MD5s are pinned in Studio's JavaScript and already in use for
+    deduplication. CPython 3.14 on Windows exposes ``zlib.ZLIBNG_VERSION``; older
+    builds only advertise it as ``1.3.1.zlib-ng`` in ``ZLIB_RUNTIME_VERSION``.
     """
     zlibng_version = getattr(zlib, "ZLIBNG_VERSION", None)
+    if zlibng_version is None and "zlib-ng" in zlib.ZLIB_RUNTIME_VERSION:
+        zlibng_version = zlib.ZLIB_RUNTIME_VERSION
     if zlibng_version is not None:
         raise RuntimeError(
             "This interpreter's zlib module is backed by zlib-ng {}, which produces "

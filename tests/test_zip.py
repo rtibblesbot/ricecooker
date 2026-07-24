@@ -81,16 +81,19 @@ def test_predictable_zip(case_name, case):
         cleanup(temp_dir)
 
 
-def test_refuses_to_build_archives_on_zlib_ng(monkeypatch):
-    # zlib-ng compresses to different bytes than zlib, so the hashes above (and the
-    # ones already stored in Studio) are unreproducible on such an interpreter.
-    monkeypatch.setattr(zip_module.zlib, "ZLIBNG_VERSION", "2.2.5", raising=False)
-    temp_dir = create_test_files(TEST_CASES["reversed"]["files"])
-    try:
-        with pytest.raises(RuntimeError, match="zlib-ng"):
-            create_predictable_zip(temp_dir)
-    finally:
-        cleanup(temp_dir)
+@pytest.mark.parametrize(
+    "attribute,value",
+    [
+        # CPython 3.14+ advertises zlib-ng with a dedicated constant...
+        ("ZLIBNG_VERSION", "2.2.5"),
+        # ...older interpreters only report it in the zlib-compat version string.
+        ("ZLIB_RUNTIME_VERSION", "1.3.1.zlib-ng"),
+    ],
+)
+def test_refuses_to_build_archives_on_zlib_ng(monkeypatch, tmp_path, attribute, value):
+    monkeypatch.setattr(zip_module.zlib, attribute, value, raising=False)
+    with pytest.raises(RuntimeError, match="zlib-ng"):
+        create_predictable_zip(str(tmp_path))
 
 
 def test_order_independence():
