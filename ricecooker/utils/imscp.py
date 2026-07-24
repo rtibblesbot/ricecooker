@@ -17,6 +17,7 @@ import chardet
 LOGGER = logging.getLogger(__name__)
 
 XML_BASE = "{http://www.w3.org/XML/1998/namespace}base"
+XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
 
 QTI_RESOURCE_TYPE_PREFIX = "imsqti_"
 
@@ -51,7 +52,7 @@ def parse_imscp_manifest(ims_dir):
     """
     root = _read_manifest(os.path.join(ims_dir, "imsmanifest.xml"))
 
-    metadata = _collect_general_metadata(root.find("{*}metadata"))
+    metadata = collect_metadata(root, ims_dir)
 
     resources = {
         r.get("identifier"): r for r in root.findall("{*}resources/{*}resource")
@@ -59,7 +60,7 @@ def parse_imscp_manifest(ims_dir):
 
     children = []
     for org in root.findall("{*}organizations/{*}organization"):
-        node = _walk_items(org)
+        node = _walk_items(org, ims_dir)
         _collect_resources(node, resources)
         children.append(flatten_single_child_topics(node))
 
@@ -97,22 +98,147 @@ def _element_text(elem):
     return "".join(elem.itertext()).strip()
 
 
-def _collect_general_metadata(metadata_elem):
-    """Extract ``title``/``description``/``language`` from LOM ``<general>``."""
-    metadata = {}
+def contained_path(root, member):
+    """Resolve ``member`` under ``root``; return the path, or None if it escapes.
+
+    Manifest hrefs, file paths and metadata locations are all untrusted, so a
+    ``../`` traversal must not read files from outside the extracted package (or
+    write outside the staging directory a leaf is assembled in).
+    """
+    root_abs = os.path.abspath(root)
+    target = os.path.abspath(os.path.join(root_abs, member))
+    if target != root_abs and not target.startswith(root_abs + os.sep):
+        return None
+    return target
+
+
+def _lom_text(elem):
+    """The stripped text of a LOM element, or None when empty."""
+    return (
+        elem.text.strip()
+        if elem is not None and elem.text and elem.text.strip()
+        else None
+    )
+
+
+def _extract_lom_text(elem, preferred_language):
+    """Read text from a LOM field, handling its several shapes.
+
+    Handles ``<string language="en">``/``<langstring xml:lang="en">`` (returning a
+    preferred-language match, the single value, or a list), ``<source>/<value>``
+    pairs, and bare element text.
+    """
+    strings = elem.findall("{*}string") or elem.findall("{*}langstring")
+    if strings:
+        if preferred_language is not None:
+            for s in strings:
+                lang = s.get("language", "") or s.get(XML_LANG, "")
+                if lang.startswith(preferred_language):
+                    return _lom_text(s)
+        if len(strings) == 1:
+            return _lom_text(strings[0])
+        return [_lom_text(s) for s in strings]
+
+    # A LOM vocabulary term is ``<value><langstring>term</langstring></value>``
+    # (or plain ``<value>term</value>``); recurse so the term text is read, not
+    # the whitespace between ``<value>`` and its child.
+    value = elem.find("{*}value")
+    if value is not None:
+        return _extract_lom_text(value, preferred_language)
+
+    return _lom_text(elem)
+
+
+def _extract_contribute(contrib_elem):
+    """Extract a lifeCycle ``<contribute>`` entry as ``{"role", "entity"}``."""
+    result = {}
+    role = contrib_elem.find("{*}role")
+    if role is not None:
+        # The role vocabulary term sits in ``<value>`` (bare or langstring-wrapped).
+        role_value = _extract_lom_text(role, None)
+        if role_value:
+            result["role"] = {"value": role_value}
+    entity = contrib_elem.find("{*}entity")
+    if entity is not None and entity.text:
+        result["entity"] = entity.text
+    return result
+
+
+def _get_lom_section(metadata_elem, tag):
+    """The LOM ``<tag>`` section, whether wrapped in ``<lom>`` or bare."""
+    section = metadata_elem.find("{*}lom/{*}" + tag)
+    if section is not None:
+        return section
+    return metadata_elem.find("{*}" + tag)
+
+
+def _detect_language(metadata_elem):
+    """The preferred language declared in LOM ``<general><language>``."""
+    general = _get_lom_section(metadata_elem, "general")
+    if general is not None:
+        return _lom_text(general.find("{*}language"))
+    return None
+
+
+def _resolve_metadata_elem(elem, ims_dir):
+    """The ``<metadata>`` of ``elem``, following an external ``adlcp:location`` ref."""
+    metadata_elem = elem.find("{*}metadata")
     if metadata_elem is None:
-        return metadata
-    general = metadata_elem.find("{*}lom/{*}general")
-    if general is None:
-        return metadata
-    for key in ("title", "description", "language"):
-        text = _element_text(general.find("{*}" + key))
-        if text:
-            metadata[key] = text
+        return None
+    location = metadata_elem.find("{*}location")
+    if location is not None and location.text:
+        ext_path = contained_path(ims_dir, location.text.strip())
+        if ext_path and os.path.isfile(ext_path):
+            try:
+                return ET.parse(ext_path).getroot()
+            except ET.ParseError:
+                LOGGER.warning(
+                    "IMSCP: could not parse external metadata %s", location.text
+                )
+    return metadata_elem
+
+
+def _collect_field(section, field, preferred_language):
+    """The value of LOM ``field`` in ``section``: scalar when single, list when repeated."""
+    elems = section.findall("{*}" + field)
+    if not elems:
+        return None
+    if field == "contribute":
+        values = [_extract_contribute(e) for e in elems]
+    else:
+        values = [_extract_lom_text(e, preferred_language) for e in elems]
+    return values[0] if len(values) == 1 else values
+
+
+def collect_metadata(elem, ims_dir):
+    """Extract the raw LOM metadata dict from ``elem``'s ``<metadata>``.
+
+    Covers the sections named in :data:`LOM_METADATA_KEYS`. Mapping onto
+    content-node fields is done separately by
+    :func:`~ricecooker.utils.SCORM_metadata.metadata_dict_to_content_node_fields`.
+    """
+    metadata_elem = _resolve_metadata_elem(elem, ims_dir)
+    if metadata_elem is None:
+        return {}
+
+    preferred_language = _detect_language(metadata_elem)
+
+    metadata = {}
+    for tag, fields in LOM_METADATA_KEYS.items():
+        section = _get_lom_section(metadata_elem, tag)
+        if section is None:
+            continue
+        for field in fields:
+            value = _collect_field(section, field, preferred_language)
+            if value is not None:
+                # Prefix rights fields so ``rights/description`` does not collide
+                # with ``general/description``.
+                key = "rights_" + field if tag == "rights" else field
+                metadata[key] = value
     return metadata
 
 
-def _walk_items(elem):
+def _walk_items(elem, ims_dir):
     """Build an item/topic dict from ``elem`` and recurse into child ``<item>``s."""
     node = {_strip_ns(k): v for k, v in elem.attrib.items()}
 
@@ -127,7 +253,11 @@ def _walk_items(elem):
     if mastery:
         node["masteryscore"] = mastery
 
-    children = [_walk_items(item) for item in elem.findall("{*}item")]
+    metadata = collect_metadata(elem, ims_dir)
+    if metadata:
+        node["metadata"] = metadata
+
+    children = [_walk_items(item, ims_dir) for item in elem.findall("{*}item")]
     if children:
         node["children"] = children
 
@@ -246,6 +376,8 @@ def flatten_single_child_topics(node):
         only_child = node["children"][0]
         if not only_child.get("title"):
             only_child["title"] = node.get("title")
+        if not only_child.get("metadata") and node.get("metadata"):
+            only_child["metadata"] = node["metadata"]
         return only_child
 
     return node

@@ -952,21 +952,63 @@ class ContentNode(TreeNode):
         kwargs.setdefault("language", self.language)
         return File(**kwargs)
 
-    def _apply_content_metadata(
-        self, node, metadata, skip=frozenset(), check_kind=False
-    ):
+    # License-related fields live on the node's License object, not as plain
+    # attributes, so they must go through set_license rather than setattr.
+    _LICENSE_METADATA_KEYS = frozenset(
+        {"license", "license_description", "copyright_holder"}
+    )
+
+    # Keys a descendant's constructor already consumed, and the topic variant that
+    # also drops license fields (a folder never carries one).
+    _CONSTRUCTOR_KEYS = frozenset({"source_id", "title"})
+    _TOPIC_SKIP_KEYS = _CONSTRUCTOR_KEYS | _LICENSE_METADATA_KEYS
+    # Package-level metadata applies to this node, but its identity and kind stay
+    # put — kind may have been clobbered to the package file kind by extraction.
+    _PACKAGE_SKIP_KEYS = _CONSTRUCTOR_KEYS | {"kind"}
+
+    def _apply_content_metadata(self, node, metadata, skip=frozenset()):
         """Copy scalar content-node metadata onto ``node`` via setattr.
 
         Structural keys (children/files) and any keys in ``skip`` (e.g. constructor
-        args already consumed) are ignored; ``extra_fields`` is merged, not replaced.
+        args already consumed) are ignored; ``extra_fields`` is merged, not replaced;
+        license fields are routed through ``set_license``.
         """
+        self._apply_license_metadata(node, metadata, skip)
+        ignore = skip | self._LICENSE_METADATA_KEYS | {"children", "files"}
         for key, value in metadata.items():
-            if key in ("children", "files") or key in skip:
+            if key in ignore:
                 continue
             if key == "extra_fields":
                 node.extra_fields.update(value or {})
             else:
                 setattr(node, key, value)
+
+    def _apply_license_metadata(self, node, metadata, skip):
+        """Apply license/copyright fields to ``node`` through ``set_license``.
+
+        A new license id rebuilds the License; when only a holder/description is
+        supplied, the node's existing License is enriched rather than dropped.
+        """
+        present = self._LICENSE_METADATA_KEYS & metadata.keys() - skip
+        if not present:
+            return
+        copyright_holder = metadata.get("copyright_holder")
+        description = metadata.get("license_description")
+        if "license" in present:
+            # LOM may refine the license type without naming a holder; inherit the
+            # node's existing holder so a holder-requiring license stays valid.
+            if copyright_holder is None and node.license is not None:
+                copyright_holder = node.license.copyright_holder
+            node.set_license(
+                metadata["license"],
+                copyright_holder=copyright_holder,
+                description=description,
+            )
+        elif node.license is not None:
+            if copyright_holder is not None:
+                node.license.copyright_holder = copyright_holder
+            if description is not None:
+                node.license.description = description
 
     def _process_uri(self):
         try:
@@ -989,7 +1031,7 @@ class ContentNode(TreeNode):
         # package's own file kind by the extract stage.
         children = content_metadata.get("children")
         if children is not None:
-            self._expand_content_tree(children)
+            self._expand_content_tree(content_metadata)
             return
         for metadata_dict in file_metadata_dicts:
             self.add_file(self._file_from_metadata(metadata_dict))
@@ -1002,7 +1044,7 @@ class ContentNode(TreeNode):
             )
         self._apply_content_metadata(self, content_metadata)
 
-    def _expand_content_tree(self, children):
+    def _expand_content_tree(self, content_metadata):
         """Expand a metadata tree into a Topic/Folder subtree of descendant nodes.
 
         Descendants must self-process: ``ChannelManager.process_tree`` snapshots the
@@ -1010,7 +1052,10 @@ class ContentNode(TreeNode):
         visited by that walk and must be processed/validated in place.
         """
         self.kind = content_kinds.TOPIC
-        for child_dict in children:
+        self._apply_content_metadata(
+            self, content_metadata, skip=self._PACKAGE_SKIP_KEYS
+        )
+        for child_dict in content_metadata["children"]:
             child = self._build_descendant(child_dict)
             self.add_child(child)
             self._process_descendant(child)
@@ -1037,6 +1082,9 @@ class ContentNode(TreeNode):
             )
             for child_dict in node_dict.get("children") or []:
                 topic.add_child(self._build_descendant(child_dict))
+            self._apply_content_metadata(
+                topic, node_dict, skip=frozenset({"source_id", "title"})
+            )
             return topic
         node = ContentNode(
             source_id=node_dict["source_id"],

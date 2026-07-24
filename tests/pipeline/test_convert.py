@@ -1045,6 +1045,41 @@ def _build_single_resource_imscp(path, href, index_html, extra_files=None):
     _create_archive(path, files)
 
 
+def _build_metadata_imscp(path):
+    """One static-article resource carrying per-item LOM metadata."""
+    manifest = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<manifest xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2" '
+        'identifier="MAN">'
+        '<organizations default="ORG"><organization identifier="ORG">'
+        "<title>Org</title>"
+        '<item identifier="ITEM" identifierref="RES"><title>Leaf</title>'
+        "<metadata><lom>"
+        "<general><keyword><langstring>databases</langstring></keyword>"
+        "<description><langstring>A short article.</langstring></description>"
+        "</general>"
+        "<educational><learningResourceType><value>"
+        "<langstring>narrative text</langstring></value></learningResourceType>"
+        "</educational>"
+        "<rights><description><langstring>"
+        "Creative Commons Attribution-ShareAlike 4.0"
+        "</langstring></description></rights>"
+        "<lifeCycle><contribute><role><value><langstring>author</langstring>"
+        "</value></role><entity>FN:Ada Lovelace</entity></contribute></lifeCycle>"
+        "</lom></metadata>"
+        "</item></organization></organizations>"
+        '<resources><resource identifier="RES" type="webcontent" href="article.html">'
+        '<file href="article.html"/></resource></resources></manifest>'
+    )
+    _create_archive(
+        path,
+        {
+            "imsmanifest.xml": manifest,
+            "article.html": "<html><body><h1>Title</h1><p>Prose.</p></body></html>",
+        },
+    )
+
+
 class TestIMSCPDecomposition:
     """The IMSCP handler decomposes a package into a native node subtree."""
 
@@ -1118,6 +1153,53 @@ class TestIMSCPDecomposition:
         assert len(leaves) == 1
         assert leaves[0]["kind"] == content_kinds.DOCUMENT
         assert any(f["preset"] == format_presets.KPUB_ZIP for f in leaves[0]["files"])
+
+    def test_leaf_carries_mapped_lom_metadata(self):
+        # LOM educational/rights/general/lifeCycle metadata on a resource maps
+        # onto the decomposed leaf's content-node fields.
+        from le_utils.constants import licenses
+        from le_utils.constants.labels import learning_activities
+        from le_utils.constants.labels import resource_type
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "meta.zip")
+            _build_metadata_imscp(path)
+            tree = (
+                FilePipeline().execute(path, skip_cache=True)[0].content_node_metadata
+            )
+        leaf = next(iter(_tree_dict_leaves(tree)))
+        assert leaf["learning_activities"] == [learning_activities.READ]
+        assert leaf["resource_types"] == [resource_type.TEXTBOOK]
+        assert leaf["license"] == licenses.CC_BY_SA
+        assert leaf["tags"] == ["databases"]
+        assert leaf["author"] == "Ada Lovelace"
+        assert leaf["description"] == "A short article."
+
+    def test_node_expansion_applies_lom_metadata(self):
+        # Through the real consumer: the mapped licence is rebuilt via set_license
+        # (overriding the package default) and the label fields land on the node.
+        from le_utils.constants import licenses
+        from le_utils.constants.labels import learning_activities
+
+        from ricecooker.classes.licenses import get_license
+        from ricecooker.classes.nodes import ContentNode
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "meta.zip")
+            _build_metadata_imscp(path)
+            node = ContentNode(
+                source_id="pkg",
+                title="Pkg",
+                license=get_license("CC BY", copyright_holder="Pkg holder"),
+                uri=path,
+                pipeline=FilePipeline(),
+            )
+            node.process_files()
+
+        leaf = next(iter(_leaf_nodes(node)))
+        assert leaf.license.license_id == licenses.CC_BY_SA
+        assert learning_activities.READ in leaf.learning_activities
+        assert leaf.tags == ["databases"]
 
     def test_manifest_href_traversal_is_rejected(self):
         # A manifest whose href points outside the extracted package (a hostile

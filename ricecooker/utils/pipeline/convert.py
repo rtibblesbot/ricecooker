@@ -51,6 +51,7 @@ from ricecooker.utils.references import DEFAULT_MAPPERS
 from ricecooker.utils.references import ReferenceMapper
 from ricecooker.utils.references import sanitize_style_css
 from ricecooker.utils.references import strip_scripts
+from ricecooker.utils.SCORM_metadata import metadata_dict_to_content_node_fields
 from ricecooker.utils.subtitles import build_subtitle_converter_from_file
 from ricecooker.utils.subtitles import InvalidSubtitleFormatError
 from ricecooker.utils.subtitles import InvalidSubtitleLanguageError
@@ -838,18 +839,23 @@ _SUPPLEMENTARY_PRESETS = frozenset(
     p.id for p in format_presets.PRESETLIST if p.supplementary
 )
 
+# Keys that carry a node's identity/shape; LOM-derived descriptive metadata
+# must never overwrite them.
+_STRUCTURAL_METADATA_KEYS = frozenset(
+    {"source_id", "title", "kind", "children", "files"}
+)
 
-def _content_node_field(content_node_metadata, key):
-    """Read ``key`` off a ContentNodeMetadata that may be an object or a dict.
 
-    A sub-pipeline result carries it as a dict (``merge`` round-trips through
-    ``to_dict``); a freshly built one is the dataclass.
-    """
-    if content_node_metadata is None:
-        return None
-    if isinstance(content_node_metadata, dict):
-        return content_node_metadata.get(key)
-    return getattr(content_node_metadata, key, None)
+def _lom_content_fields(node_dict):
+    """Map a parsed node's raw LOM ``metadata`` to content-node fields."""
+    return metadata_dict_to_content_node_fields(node_dict.get("metadata") or {})
+
+
+def _merge_lom_fields(built, fields):
+    """Copy non-structural LOM-derived ``fields`` onto a built tree dict."""
+    for key, value in fields.items():
+        if key not in _STRUCTURAL_METADATA_KEYS:
+            built.setdefault(key, value)
 
 
 def _summarize_leaf(sub):
@@ -969,11 +975,20 @@ class IMSCPConversionHandler(ExtensionMatchingHandler):
                 zf.extractall(temp_dir)
             manifest = parse_imscp_manifest(temp_dir)
             children = self._build_nodes(manifest.get("children"), temp_dir)
+        # Package-level LOM metadata (tags, description, licence, …) rides on the
+        # topmost node; identity keys stay off so they cannot clash with the
+        # explicit constructor args below.
+        manifest_fields = {
+            key: value
+            for key, value in _lom_content_fields(manifest).items()
+            if key not in _STRUCTURAL_METADATA_KEYS
+        }
         return FileMetadata(
             content_node_metadata=ContentNodeMetadata(
                 kind=content_kinds.TOPIC,
                 title=manifest.get("title"),
                 children=children,
+                **manifest_fields,
             )
         )
 
@@ -983,13 +998,18 @@ class IMSCPConversionHandler(ExtensionMatchingHandler):
 
     def _build_node(self, node_dict, package):
         if node_dict.get("children"):
+            fields = lom_content_fields(node_dict)
             # A topic whose leaves were all rejected keeps its (empty) folder.
-            return {
+            topic = {
                 "source_id": node_dict["source_id"],
-                "title": node_dict.get("title") or node_dict["source_id"],
-                "children": self._build_nodes(node_dict["children"], temp_dir),
+                "title": node_dict.get("title")
+                or fields.get("title")
+                or node_dict["source_id"],
+                "children": self._build_nodes(node_dict["children"], package),
             }
-        return self._build_leaf(node_dict, temp_dir)
+            merge_lom_fields(topic, fields)
+            return topic
+        return self._build_leaf(node_dict, package)
 
     def _build_leaf(self, node_dict, package):
         source_id = node_dict.get("source_id")
@@ -1047,14 +1067,16 @@ class IMSCPConversionHandler(ExtensionMatchingHandler):
             return None
 
         kind, files, extra_fields = _summarize_leaf(sub)
+        fields = _lom_content_fields(node_dict)
         leaf = {
             "source_id": source_id,
-            "title": node_dict.get("title") or source_id,
+            "title": node_dict.get("title") or fields.get("title") or source_id,
             "kind": kind,
             "files": files,
         }
         if extra_fields:
             leaf["extra_fields"] = extra_fields
+        merge_lom_fields(leaf, fields)
         return leaf
 
     def _process_html5_leaf(self, node_dict, temp_dir):

@@ -124,16 +124,81 @@ def test_parse_gitta_deep_tree(tmp_path):
         assert topic["title"]
 
 
+def test_collect_metadata_from_gitta(tmp_path):
+    # gitta carries LOM <general> (title/language/keyword) and <rights> at the
+    # manifest level; the parser lifts them into the node metadata dict.
+    ims_dir = _extract("gitta_ims.zip", tmp_path)
+    metadata = parse_imscp_manifest(ims_dir)["metadata"]
+    assert metadata["title"] == "Databases"
+    assert metadata["language"] == "en"
+    assert len(metadata["keyword"]) == 15
+    assert "Database Management" in metadata["keyword"]
+    # rights/description is prefixed so it does not collide with general/description.
+    assert metadata["rights_description"] == "GITTA 2000-2005"
+
+
+def test_collect_metadata_lom_vocab_and_contribute(tmp_path):
+    # Educational vocab terms live in <value><langstring>; contributors in VCARDs.
+    leaf = _parse_leaf(
+        tmp_path,
+        '<resource identifier="RES" type="webcontent" href="p.html">'
+        '<file href="p.html"/></resource>',
+        item_body="<metadata><lom>"
+        "<educational>"
+        "<interactivityType><value><langstring>active</langstring></value></interactivityType>"
+        "<learningResourceType><value><langstring>narrative text</langstring></value>"
+        "</learningResourceType>"
+        "</educational>"
+        "<rights><description><langstring>Creative Commons Attribution-ShareAlike"
+        "</langstring></description></rights>"
+        "<lifeCycle><contribute><role><value><langstring>author</langstring></value>"
+        "</role><entity>FN:Ada Lovelace</entity></contribute></lifeCycle>"
+        "</lom></metadata>",
+    )
+    metadata = leaf["metadata"]
+    assert metadata["interactivityType"] == "active"
+    assert metadata["learningResourceType"] == "narrative text"
+    assert metadata["rights_description"].startswith("Creative Commons")
+    assert metadata["contribute"] == {
+        "role": {"value": "author"},
+        "entity": "FN:Ada Lovelace",
+    }
+
+
+def test_collect_metadata_external_location(tmp_path):
+    # An <adlcp:location> under <metadata> points at an external LOM file, which
+    # the parser resolves relative to the package directory.
+    with open(os.path.join(str(tmp_path), "meta.xml"), "w", encoding="utf-8") as fh:
+        fh.write(
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<lom xmlns="http://www.imsglobal.org/xsd/imsmd_rootv1p2p1">'
+            "<general><title><langstring>External Title</langstring></title>"
+            "<keyword><langstring>alpha</langstring></keyword></general></lom>"
+        )
+    _write_manifest(
+        str(tmp_path),
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<manifest xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2" '
+        'xmlns:adlcp="http://www.adlnet.org/xsd/adlcp_rootv1p2" identifier="M">'
+        "<metadata><schema>IMS CONTENT</schema>"
+        "<adlcp:location>meta.xml</adlcp:location></metadata>"
+        '<organizations default="ORG"><organization identifier="ORG"><title>Org</title>'
+        '<item identifier="IT" identifierref="RES"><title>Leaf</title></item>'
+        "</organization></organizations>"
+        '<resources><resource identifier="RES" type="webcontent" href="p.html">'
+        '<file href="p.html"/></resource></resources></manifest>',
+    )
+    metadata = parse_imscp_manifest(str(tmp_path))["metadata"]
+    assert metadata["title"] == "External Title"
+    # A lone <keyword> collects as a single value; the mapping normalizes to a list.
+    assert metadata["keyword"] == "alpha"
+
+
 def test_leaf_source_id_from_identifier(tmp_path):
     ims_dir = _extract("test_quiz.zip", tmp_path)
     manifest = parse_imscp_manifest(ims_dir)
     leaf = manifest["children"][0]["children"][0]
     assert leaf["source_id"] == "ITEM-56C2D9D9-ACA6-40B5-8A5D-A70DB05370FC"
-
-
-def _write_manifest(directory, manifest_xml):
-    with open(os.path.join(directory, "imsmanifest.xml"), "w", encoding="utf-8") as fh:
-        fh.write(manifest_xml)
 
 
 def test_xml_base_applied_to_index_file(tmp_path):
