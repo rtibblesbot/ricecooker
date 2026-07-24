@@ -4,6 +4,7 @@ import tempfile
 
 import pytest
 
+from ricecooker.utils import zip as zip_module
 from ricecooker.utils.zip import create_predictable_zip
 from ricecooker.utils.zip import find_common_root
 from ricecooker.utils.zip import find_html_entrypoint
@@ -76,6 +77,18 @@ def test_predictable_zip(case_name, case):
     try:
         md5 = generate_md5(temp_dir, case.get("entrypoint"))
         assert md5 == case["expected_md5"], f"MD5 mismatch for {case_name}"
+    finally:
+        cleanup(temp_dir)
+
+
+def test_refuses_to_build_archives_on_zlib_ng(monkeypatch):
+    # zlib-ng compresses to different bytes than zlib, so the hashes above (and the
+    # ones already stored in Studio) are unreproducible on such an interpreter.
+    monkeypatch.setattr(zip_module.zlib, "ZLIBNG_VERSION", "2.2.5", raising=False)
+    temp_dir = create_test_files(TEST_CASES["reversed"]["files"])
+    try:
+        with pytest.raises(RuntimeError, match="zlib-ng"):
+            create_predictable_zip(temp_dir)
     finally:
         cleanup(temp_dir)
 
