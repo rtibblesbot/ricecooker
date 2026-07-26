@@ -39,10 +39,10 @@ from ricecooker.utils.pipeline.convert import HTML5ConversionHandler
 from ricecooker.utils.pipeline.convert import KPUBConversionHandler
 from ricecooker.utils.pipeline.convert import PandocMissingError
 from ricecooker.utils.pipeline.exceptions import InvalidFileException
-from ricecooker.utils.pipeline.scorm import has_assessment_semantics
-from ricecooker.utils.pipeline.scorm import single_media_member
-from ricecooker.utils.pipeline.scorm import strip_scorm_boilerplate
 from ricecooker.utils.references import DEFAULT_MAPPERS
+from ricecooker.utils.scorm import has_assessment_semantics
+from ricecooker.utils.scorm import single_media_member
+from ricecooker.utils.scorm import strip_scorm_boilerplate
 
 # A valid 1x1 PNG, small enough to inline but real enough to pass the CONVERT
 # stage's image verification (so external image refs survive download -> convert).
@@ -261,7 +261,7 @@ class TestHTML5EntryPoint:
         results = self._execute(
             {
                 "dist/index.html": self.VALID_HTML,
-                "dist/css/style.css": "body { color: red; }",
+                "dist/js/app.js": "console.log('hello');",
             }
         )
         # The common root is stripped, so index.html ends up at the root
@@ -270,7 +270,7 @@ class TestHTML5EntryPoint:
         with zipfile.ZipFile(results[0].path) as zf:
             names = set(zf.namelist())
         assert "index.html" in names
-        assert "css/style.css" in names
+        assert "js/app.js" in names
 
     def test_nested_non_index_entry_denested_and_recorded(self):
         results = self._execute({"dist/app.html": self.VALID_HTML})
@@ -294,9 +294,14 @@ class TestKPUBValidation:
     def test_valid_archive(self):
         self._validate({"index.html": "<html><body><p>Hello world</p></body></html>"})
 
-    def test_missing_index_html(self):
-        with pytest.raises(InvalidFileException, match="(?i)index.html"):
-            self._validate({"content.html": "<html><body><p>Hello</p></body></html>"})
+    def test_non_index_entry_point_accepted(self):
+        # Kolibri's KPUB renderer honours extra_fields.options.entry, so the
+        # entry point need not be a root index.html.
+        self._validate({"content.html": "<html><body><p>Hello</p></body></html>"})
+
+    def test_no_html_file_rejected(self):
+        with pytest.raises(InvalidFileException, match="(?i)no HTML file"):
+            self._validate({"notes.txt": "no markup here"})
 
     def test_javascript_rejected(self):
         with pytest.raises(InvalidFileException, match="(?i)javascript"):
@@ -949,9 +954,9 @@ class TestKPUBPromotion:
         )
         assert result[0].preset == format_presets.HTML5_ZIP
 
-    def test_scorm_boilerplate_only_stays_html5_due_to_js_member(self):
-        # A static SCO whose only script is a SCORM wrapper: the inline plumbing is
-        # discounted, but the physical wrapper .js member keeps it an HTML5 zip.
+    def test_scorm_boilerplate_stripped_and_promoted(self):
+        # A static SCO whose only script is a SCORM wrapper: the plumbing carries
+        # no content, so it is stripped and the page becomes a KPUB.
         result = self._run(
             {
                 "index.html": (
@@ -961,25 +966,31 @@ class TestKPUBPromotion:
                 "SCORM_API_wrapper.js": "function LMSInitialize(){}",
             }
         )
-        assert result[0].preset == format_presets.HTML5_ZIP
+        assert result[0].preset == format_presets.KPUB_ZIP
+        with zipfile.ZipFile(result[0].path) as zf:
+            assert zf.namelist() == ["index.html"]
 
-    def test_css_member_stays_html5(self):
+    def test_css_member_stripped_and_promoted(self):
+        # Unnecessary styling is not a reason to ship a whole HTML5 zip.
         result = self._run(
             {
-                "index.html": "<html><body><p>Styled</p></body></html>",
+                "index.html": (
+                    "<html><head><link rel='stylesheet' href='style.css'></head>"
+                    "<body><p>Styled</p></body></html>"
+                ),
                 "style.css": "p{color:red}",
             }
         )
-        assert result[0].preset == format_presets.HTML5_ZIP
+        assert result[0].preset == format_presets.KPUB_ZIP
+        with zipfile.ZipFile(result[0].path) as zf:
+            assert zf.namelist() == ["index.html"]
+            assert "style.css" not in zf.read("index.html").decode("utf-8")
 
-    def test_downloaded_external_css_blocks_promotion(self):
-        # The zip ships no .css member, but reference resolution downloads the
-        # externally-referenced stylesheet into the archive. Judging KPUB criteria
-        # before that ran would seal a .kpub containing CSS.
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "test.zip")
-            _create_archive(
-                path,
+    def test_downloaded_external_css_stripped_on_promotion(self):
+        # Promotion is judged after reference resolution, so a stylesheet that was
+        # downloaded into the archive is stripped rather than sealed into a .kpub.
+        with _fake_download_session({"https://ex.com/s.css": b"p{color:red}"}):
+            result = self._run(
                 {
                     "index.html": (
                         "<html><head>"
@@ -988,11 +999,18 @@ class TestKPUBPromotion:
                     )
                 }
             )
-            with _fake_download_session({"https://ex.com/s.css": b"p{color:red}"}):
-                result = FilePipeline().execute(path, skip_cache=True)
-        assert result[0].preset == format_presets.HTML5_ZIP
+        assert result[0].preset == format_presets.KPUB_ZIP
         with zipfile.ZipFile(result[0].path) as zf:
-            assert any(n.endswith(".css") for n in zf.namelist())
+            assert not any(n.endswith(".css") for n in zf.namelist())
+
+    def test_non_index_entry_promoted_with_entry_hint(self):
+        # A KPUB may name its entry point, so a static article at another path is
+        # promoted and the entry recorded for the renderer.
+        result = self._run({"article.html": "<html><body><p>Prose</p></body></html>"})
+        assert result[0].preset == format_presets.KPUB_ZIP
+        assert result[0].content_node_metadata["extra_fields"] == {
+            "options": {"entry": "article.html"}
+        }
 
 
 _IMSCP_FIXTURE_DIR = os.path.join(

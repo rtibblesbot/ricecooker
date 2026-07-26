@@ -9,10 +9,19 @@ Ported from ``learningequality/imscp`` ``core.py`` to stdlib
 import io
 import logging
 import os
+import posixpath
 import re
+import shutil
+from collections import deque
+from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 
 import chardet
+
+from ricecooker.utils.references import DEFAULT_MAPPERS
+from ricecooker.utils.references import is_data_uri
+from ricecooker.utils.references import is_external_url
+from ricecooker.utils.SCORM_metadata import metadata_dict_to_content_node_fields
 
 LOGGER = logging.getLogger(__name__)
 
@@ -20,6 +29,9 @@ XML_BASE = "{http://www.w3.org/XML/1998/namespace}base"
 XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
 
 QTI_RESOURCE_TYPE_PREFIX = "imsqti_"
+
+# The IMS Content Package manifest, always at the root of the package.
+IMSCP_MANIFEST = "imsmanifest.xml"
 
 # LOM sections and the fields lifted out of each, keyed by LOM element name.
 LOM_METADATA_KEYS = {
@@ -50,7 +62,7 @@ def parse_imscp_manifest(ims_dir):
     "scormtype", "files"}``). ``files`` are archive-member paths relative to
     ``ims_dir``.
     """
-    root = _read_manifest(os.path.join(ims_dir, "imsmanifest.xml"))
+    root = _read_manifest(os.path.join(ims_dir, IMSCP_MANIFEST))
 
     metadata = collect_metadata(root, ims_dir)
 
@@ -385,3 +397,76 @@ def flatten_single_child_topics(node):
         return only_child
 
     return node
+
+
+class IMSCPPackage:
+    """An extracted package, staging each resource into its own directory.
+
+    A resource's ``<file>`` list is under-declared often enough — shared
+    stylesheets and images left implicit, sometimes no members at all — that the
+    assets its members reference are staged too, bounded to files present in the
+    package. Navigation links are not followed, so a leaf never absorbs the pages
+    it links to.
+    """
+
+    def __init__(self, directory):
+        self.directory = directory
+        # Shared assets are staged into many leaves and the package never changes
+        # underneath us, so reference lists are cached across leaves.
+        self._references = {}
+
+    def stage(self, members, dest_dir):
+        """Copy ``members`` and their reference closure into ``dest_dir``, paths preserved."""
+        staged = set()
+        pending = deque()
+        for member in members:
+            self._stage_member(member, dest_dir, staged, pending)
+        while pending:
+            member, mapper = pending.popleft()
+            member_dir = posixpath.dirname(member)
+            for ref in self._member_references(member, mapper):
+                self._stage_member(
+                    posixpath.join(member_dir, ref), dest_dir, staged, pending
+                )
+
+    def _stage_member(self, member, dest_dir, staged, pending):
+        member = posixpath.normpath(member.replace("\\", "/"))
+        if member in staged:
+            return
+        # Staging the manifest would make the sealed leaf look like a package of
+        # its own, and decompose forever.
+        if member == IMSCP_MANIFEST:
+            return
+        # Manifest paths are untrusted: reject a ``../`` escape from the package
+        # (read side) or the staging dir (write side).
+        src = contained_path(self.directory, member)
+        dst = contained_path(dest_dir, member)
+        if src is None or dst is None or not os.path.isfile(src):
+            return
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(src, dst)
+        staged.add(member)
+        mapper = next((m for m in DEFAULT_MAPPERS if m.handles(member)), None)
+        if mapper is not None:
+            pending.append((member, mapper))
+
+    def _member_references(self, member, mapper):
+        """The package-local paths an HTML/CSS ``member`` references."""
+        if member not in self._references:
+            self._references[member] = self._extract_references(member, mapper)
+        return self._references[member]
+
+    def _extract_references(self, member, mapper):
+        try:
+            with open(contained_path(self.directory, member), encoding="utf-8") as fh:
+                content = fh.read()
+        except (OSError, UnicodeDecodeError):
+            return []
+        refs = []
+        for ref in mapper.extract(content):
+            if is_external_url(ref) or is_data_uri(ref):
+                continue
+            ref = unquote(ref.split("#")[0].split("?")[0])
+            if ref:
+                refs.append(ref)
+        return refs

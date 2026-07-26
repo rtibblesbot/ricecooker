@@ -11,13 +11,11 @@ import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from abc import abstractmethod
-from collections import deque
 from contextlib import contextmanager
 from dataclasses import field
 from typing import Dict
 from typing import Optional
 from typing import Union
-from urllib.parse import unquote
 from xml.etree import ElementTree
 
 import filetype
@@ -37,6 +35,8 @@ from ricecooker.utils.audio import AudioCompressionError
 from ricecooker.utils.audio import compress_audio
 from ricecooker.utils.caching import generate_key
 from ricecooker.utils.imscp import contained_path
+from ricecooker.utils.imscp import IMSCP_MANIFEST
+from ricecooker.utils.imscp import IMSCPPackage
 from ricecooker.utils.imscp import is_qti_resource
 from ricecooker.utils.imscp import lom_content_fields
 from ricecooker.utils.imscp import merge_lom_fields
@@ -47,16 +47,15 @@ from ricecooker.utils.pipeline.context import ContextMetadata
 from ricecooker.utils.pipeline.context import FileMetadata
 from ricecooker.utils.pipeline.exceptions import ExpectedFileException
 from ricecooker.utils.pipeline.exceptions import InvalidFileException
-from ricecooker.utils.pipeline.scorm import has_assessment_semantics
-from ricecooker.utils.pipeline.scorm import single_media_member
-from ricecooker.utils.pipeline.scorm import strip_scorm_boilerplate
 from ricecooker.utils.references import DEFAULT_MAPPERS
-from ricecooker.utils.references import is_data_uri
-from ricecooker.utils.references import is_external_url
 from ricecooker.utils.references import ReferenceMapper
 from ricecooker.utils.references import sanitize_style_css
 from ricecooker.utils.references import strip_scripts
-from ricecooker.utils.SCORM_metadata import metadata_dict_to_content_node_fields
+from ricecooker.utils.references import strip_stylesheet_links
+from ricecooker.utils.scorm import boilerplate_script_members
+from ricecooker.utils.scorm import has_assessment_semantics
+from ricecooker.utils.scorm import single_media_member
+from ricecooker.utils.scorm import strip_scorm_boilerplate
 from ricecooker.utils.subtitles import build_subtitle_converter_from_file
 from ricecooker.utils.subtitles import InvalidSubtitleFormatError
 from ricecooker.utils.subtitles import InvalidSubtitleLanguageError
@@ -86,21 +85,29 @@ class PandocConversionError(Exception):
     """Raised when pandoc fails to convert a source document."""
 
 
-def sanitize_kpub_directory(temp_dir):
-    """Strip disallowed CSS and scripts from index.html in an extracted KPUB dir, in place."""
-    index_path = os.path.join(temp_dir, "index.html")
-    try:
-        with open(index_path, encoding="utf-8") as fh:
-            html = fh.read()
-    except (OSError, UnicodeDecodeError):
-        return
+def sanitize_kpub_html(html):
+    """Strip disallowed CSS and scripts from a KPUB entry document.
+
+    Returns ``(html, removed)`` — descriptors of what was stripped, empty if unchanged.
+    """
     html, removed = sanitize_style_css(html, KPUB_STYLE_ALLOWLIST)
     # Hand-authored KPUBs already reject scripts in validate_archive; strip_scripts
     # is here for the pandoc path, whose --standalone template can inject an html5shiv.
     html, script_removed = strip_scripts(html)
-    removed += script_removed
+    return html, removed + script_removed
+
+
+def sanitize_kpub_directory(temp_dir, entry="index.html"):
+    """Sanitize a KPUB's entry document in place."""
+    entry_path = os.path.join(temp_dir, entry)
+    try:
+        with open(entry_path, encoding="utf-8") as fh:
+            html = fh.read()
+    except (OSError, UnicodeDecodeError):
+        return
+    html, removed = sanitize_kpub_html(html)
     if removed:
-        with open(index_path, "w", encoding="utf-8") as fh:
+        with open(entry_path, "w", encoding="utf-8") as fh:
             fh.write(html)
         LOGGER.info("KPUB sanitizer removed disallowed content: %s", ", ".join(removed))
 
@@ -260,35 +267,20 @@ class ArchiveProcessingBaseHandler(ExtensionMatchingHandler):
     def validate_archive(self, path: str):
         pass
 
-    def pre_process(self, temp_dir):
+    def pre_process(self, temp_dir, entry):
         """Hook run on the extracted archive dir before reference resolution. Default no-op."""
         pass
 
-    def _process_archive_dir(self, temp_dir, audio_settings, video_settings):
-        """Run pre-processing and external-reference resolution over an extracted dir."""
+    def seal_ext(self, temp_dir, ext, entry=None):
+        """Extension the processed dir is sealed as. Override to re-classify the output."""
+        return ext
+
+    def _convert_archive(self, path, audio_settings, video_settings, entry=None):
+        """Validate, extract, process and seal the archive at ``path``."""
         # Imported here rather than at module level: archive_assets depends on
         # this package's exceptions, so a top-level import would be circular.
         from ricecooker.utils.archive_assets import ArchiveProcessor
 
-        # pre_process runs before reference resolution: a url() inside a <style> block or
-        # a non-allowlisted style= would otherwise be downloaded, then orphaned when the
-        # sanitizer strips the content that referenced it.
-        self.pre_process(temp_dir)
-
-        ArchiveProcessor(
-            temp_dir,
-            self.get_pipeline(),
-            convert_stage=self.parent,
-            mappers=self.REFERENCE_MAPPERS,
-            audio_settings=audio_settings,
-            video_settings=video_settings,
-        ).process()
-
-    def seal_ext(self, temp_dir, ext):
-        """Extension the processed dir is sealed as. Override to re-classify the output."""
-        return ext
-
-    def handle_file(self, path, audio_settings=None, video_settings=None):
         self.validate_archive(path)
 
         ext = extract_path_ext(path)
@@ -312,7 +304,10 @@ class ArchiveProcessingBaseHandler(ExtensionMatchingHandler):
                 video_settings=video_settings,
             ).process()
 
-            _seal_directory_to_file(self, temp_dir, self.seal_ext(temp_dir, ext))
+            _seal_directory_to_file(self, temp_dir, self.seal_ext(temp_dir, ext, entry))
+
+    def handle_file(self, path, audio_settings=None, video_settings=None):
+        self._convert_archive(path, audio_settings, video_settings)
 
     @contextmanager
     def open_and_verify_archive(self, path):
@@ -347,26 +342,13 @@ def _empty_body_reason(dom, entry):
     return None
 
 
-def _disqualifying_member_reason(names):
-    """Why an archive's members bar it from being a KPUB, or None when they do not."""
-    if any(n.lower().endswith(".js") for n in names):
-        return "JavaScript files (.js) are not allowed."
-    if any(n.lower().endswith(".css") for n in names):
-        return "external CSS files (.css) are not allowed."
-    return None
-
-
-def _kpub_disqualifier(names, index_html, entry="index.html"):
+def _kpub_disqualifier(names, index_html, entry):
     """The first reason a KPUB candidate fails the criteria; None ⇒ it qualifies.
 
-    ``names`` are the member paths of the archive (or extracted directory) and
-    ``index_html`` the entry document's markup, ``None`` when it is missing.
-    Taking the markup separately lets a caller judge already-transformed content
-    (e.g. with SCORM boilerplate discounted) while the member checks still run
-    over what will actually be shipped.
-
     A KPUB is static prose: a non-empty ``entry`` body, no inline ``<script>``,
-    and no ``.js`` or ``.css`` member.
+    and no ``.js`` or ``.css`` member. ``index_html`` is passed separately from
+    ``names`` so a caller can judge already-transformed markup while the member
+    checks still run over what will ship.
     """
     if index_html is None:
         return f"{entry} is missing."
@@ -391,55 +373,34 @@ def _kpub_disqualifier(names, index_html, entry="index.html"):
 
 
 def _archive_member_names(directory):
-    """Every file name in ``directory``; only ever extension-tested, so not path-qualified."""
-    return [name for _, _, filenames in os.walk(directory) for name in filenames]
+    """Every file in ``directory``, as archive-style paths relative to it."""
+    return [
+        os.path.relpath(os.path.join(dirpath, name), directory).replace(os.sep, "/")
+        for dirpath, _, filenames in os.walk(directory)
+        for name in filenames
+    ]
 
 
-class HTML5ConversionHandler(ArchiveProcessingBaseHandler):
-    EXTENSIONS = {file_formats.HTML5}
-    FILE_TYPE = "HTML5"
+class WebArchiveConversionHandler(ArchiveProcessingBaseHandler):
+    """Zip of web content that Kolibri serves from an HTML entry point.
 
-    def _qualifies_as_kpub(self, temp_dir):
-        """A static-article HTML5 zip is promoted to a KPUB; anything with scripts
-        or JS/CSS members stays an HTML5 zip.
+    Denests a single-root zip (mirroring Studio's ``cleanHTML5Zip``) and records
+    an entry point other than a root ``index.html`` for the renderer.
+    """
 
-        Judged over the *processed* directory: reference resolution downloads
-        externally-referenced stylesheets and scripts into it, and those count
-        against the criteria just as much as ones the archive shipped with.
-        """
-        names = _archive_member_names(temp_dir)
-        # A .js/.css member disqualifies whatever the markup says, so test that
-        # first and spare the majority of HTML5 zips the read and parse below.
-        if _disqualifying_member_reason(names):
-            return False
-        try:
-            with open(
-                os.path.join(temp_dir, "index.html"), encoding="utf-8", errors="replace"
-            ) as fh:
-                index_html = fh.read()
-        except OSError:
-            return False
-        # Discount SCORM plumbing before judging inline scripts; the wrapper
-        # .js members it leaves behind still disqualify a genuine SCORM package.
-        discounted = strip_scorm_boilerplate(index_html)
-        return _kpub_disqualifier(names, discounted) is None
-
-    def seal_ext(self, temp_dir, ext):
-        if not self._qualifies_as_kpub(temp_dir):
-            return ext
-        sanitize_kpub_directory(temp_dir)
-        return file_formats.HTML5_ARTICLE
+    def entry_point(self, names):
+        """The archive member Kolibri should load, or None when there is no HTML."""
+        return find_html_entrypoint([n for n in names if not n.endswith("/")])
 
     def handle_file(self, path, audio_settings=None, video_settings=None):
         prepared_path, entry = self._prepare_archive(path)
         try:
-            super().handle_file(prepared_path, audio_settings, video_settings)
+            self._convert_archive(prepared_path, audio_settings, video_settings, entry)
         finally:
             if prepared_path != path and os.path.exists(prepared_path):
                 os.unlink(prepared_path)
-        # Mirror Studio: when the entry point is not index.html at the root, record
-        # it in extra_fields.options.entry so Kolibri loads it. A promoted KPUB
-        # always has a root index.html, so it never needs the hint.
+        # Mirror Studio: when the entry point is not index.html at the root,
+        # record it in extra_fields.options.entry so Kolibri loads it.
         if entry and entry != "index.html":
             return FileMetadata(
                 content_node_metadata=ContentNodeMetadata(
@@ -450,14 +411,29 @@ class HTML5ConversionHandler(ArchiveProcessingBaseHandler):
 
     def validate_archive(self, path: str):
         with self.open_and_verify_archive(path) as zf:
-            names = [n for n in zf.namelist() if not n.endswith("/")]
-            entry = find_html_entrypoint(names)
+            entry = self.entry_point(zf.namelist())
             if entry is None:
                 raise InvalidFileException(
                     f"File {path} is not a valid {self.FILE_TYPE} file, "
                     "no HTML file was found in the archive."
                 )
-            self._validate_index_html_body(zf, path, entry)
+            self._validate_entry(zf, path, entry)
+
+    def _validate_entry(self, zf, path, entry):
+        """Format-specific checks on the entry point. Default: a non-empty body."""
+        try:
+            dom = html5lib.parse(
+                self.read_file_from_archive(zf, entry), namespaceHTMLElements=False
+            )
+        except ParseError:
+            raise InvalidFileException(
+                f"File {path} is not a valid {self.FILE_TYPE} file, {entry} is not well-formed."
+            )
+        reason = _empty_body_reason(dom, entry)
+        if reason:
+            raise InvalidFileException(
+                f"File {path} is not a valid {self.FILE_TYPE} file, {reason}"
+            )
 
     def _prepare_archive(self, path):
         """Denest a zip whose files all share a common parent directory
@@ -475,7 +451,7 @@ class HTML5ConversionHandler(ArchiveProcessingBaseHandler):
 
         common_root = find_common_root(names)
         if not common_root:
-            return path, find_html_entrypoint(names)
+            return path, self.entry_point(names)
 
         prefix = common_root + "/"
         with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
@@ -487,7 +463,51 @@ class HTML5ConversionHandler(ArchiveProcessingBaseHandler):
             for name in names:
                 zout.writestr(name[len(prefix) :], zin.read(name))
         denested_names = [n[len(prefix) :] for n in names]
-        return tmp_path, find_html_entrypoint(denested_names)
+        return tmp_path, self.entry_point(denested_names)
+
+
+class HTML5ConversionHandler(WebArchiveConversionHandler):
+    EXTENSIONS = {file_formats.HTML5}
+    FILE_TYPE = "HTML5"
+
+    def seal_ext(self, temp_dir, ext, entry=None):
+        if self._promote_to_kpub(temp_dir, entry or "index.html"):
+            return file_formats.HTML5_ARTICLE
+        return ext
+
+    def _promote_to_kpub(self, temp_dir, entry):
+        """Rewrite a static-article HTML5 zip into a KPUB in place; True on promotion.
+
+        SCORM plumbing and stylesheets are stripped rather than treated as
+        disqualifying — neither is content, and a KPUB renders better than an
+        HTML5 zip. Genuine scripting keeps it an HTML5 zip. Judged after
+        reference resolution, so downloaded assets count too.
+        """
+        names = _archive_member_names(temp_dir)
+        strippable = set(boilerplate_script_members(names)) | {
+            name for name in names if name.lower().endswith(".css")
+        }
+        entry_path = os.path.join(temp_dir, entry)
+        try:
+            with open(entry_path, encoding="utf-8", errors="replace") as fh:
+                html = strip_scorm_boilerplate(fh.read())
+        except OSError:
+            return False
+        kept = [name for name in names if name not in strippable]
+        if _kpub_disqualifier(kept, html, entry) is not None:
+            return False
+
+        html, _removed = strip_stylesheet_links(html)
+        html, removed = sanitize_kpub_html(html)
+        if removed:
+            LOGGER.info(
+                "KPUB sanitizer removed disallowed content: %s", ", ".join(removed)
+            )
+        with open(entry_path, "w", encoding="utf-8") as fh:
+            fh.write(html)
+        for name in strippable:
+            os.unlink(os.path.join(temp_dir, name))
+        return True
 
 
 def _map_h5p_paths(data, fn, urls):
@@ -616,24 +636,19 @@ class EPUBConversionHandler(ArchiveProcessingBaseHandler):
             self._validate_opf(zf, path, opf_path)
 
 
-class KPUBConversionHandler(ArchiveProcessingBaseHandler):
+class KPUBConversionHandler(WebArchiveConversionHandler):
     EXTENSIONS = {file_formats.HTML5_ARTICLE}
     FILE_TYPE = "KPUB"
 
-    def pre_process(self, temp_dir):
-        sanitize_kpub_directory(temp_dir)
+    def pre_process(self, temp_dir, entry):
+        sanitize_kpub_directory(temp_dir, entry or "index.html")
 
-    def validate_archive(self, path: str):
-        with self.open_and_verify_archive(path) as zf:
-            try:
-                index_html = zf.read("index.html")
-            except KeyError:
-                index_html = None
-            reason = _kpub_disqualifier(zf.namelist(), index_html)
-            if reason:
-                raise InvalidFileException(
-                    f"File {path} is not a valid {self.FILE_TYPE} file, {reason}"
-                )
+    def _validate_entry(self, zf, path, entry):
+        reason = _kpub_disqualifier(zf.namelist(), zf.read(entry), entry)
+        if reason:
+            raise InvalidFileException(
+                f"File {path} is not a valid {self.FILE_TYPE} file, {reason}"
+            )
 
 
 class BloomConversionHandler(ArchiveProcessingBaseHandler):
@@ -847,24 +862,6 @@ _SUPPLEMENTARY_PRESETS = frozenset(
     p.id for p in format_presets.PRESETLIST if p.supplementary
 )
 
-# Keys that carry a node's identity/shape; LOM-derived descriptive metadata
-# must never overwrite them.
-_STRUCTURAL_METADATA_KEYS = frozenset(
-    {"source_id", "title", "kind", "children", "files"}
-)
-
-
-def _lom_content_fields(node_dict):
-    """Map a parsed node's raw LOM ``metadata`` to content-node fields."""
-    return metadata_dict_to_content_node_fields(node_dict.get("metadata") or {})
-
-
-def _merge_lom_fields(built, fields):
-    """Copy non-structural LOM-derived ``fields`` onto a built tree dict."""
-    for key, value in fields.items():
-        if key not in _STRUCTURAL_METADATA_KEYS:
-            built.setdefault(key, value)
-
 
 def _summarize_leaf(sub):
     """Reduce a sub-pipeline result to ``(kind, file dicts, extra_fields)``.
@@ -883,85 +880,6 @@ def _summarize_leaf(sub):
     return None, files, None
 
 
-# The IMS Content Package manifest, always at the root of the package.
-_IMSCP_MANIFEST = "imsmanifest.xml"
-
-
-class _Package:
-    """One extracted IMSCP package, staging its resources into per-leaf directories.
-
-    A resource's ``<file>`` list is its declared extent, but packages routinely
-    under-declare it — shared stylesheets, scripts and images are often left
-    implicit, and some manifests declare no members at all — so the assets those
-    members reference are staged too, bounded to files that exist in the package.
-    Navigation links are not followed: the HTML mapper reports only offline
-    resources, so a leaf never absorbs the pages it links to.
-    """
-
-    def __init__(self, directory):
-        self.directory = directory
-        # Reference lists are cached across leaves: shared assets are staged into
-        # many of them, and the extracted package never changes underneath us.
-        self._references = {}
-
-    def stage(self, members, dest_dir):
-        """Copy ``members`` and their reference closure into ``dest_dir``, paths preserved."""
-        staged = set()
-        pending = deque()
-        for member in members:
-            self._stage_member(member, dest_dir, staged, pending)
-        while pending:
-            member, mapper = pending.popleft()
-            member_dir = posixpath.dirname(member)
-            for ref in self._member_references(member, mapper):
-                self._stage_member(
-                    posixpath.join(member_dir, ref), dest_dir, staged, pending
-                )
-
-    def _stage_member(self, member, dest_dir, staged, pending):
-        """Copy one package member into the staging dir, queuing it for scanning."""
-        member = posixpath.normpath(member.replace("\\", "/"))
-        if member in staged:
-            return
-        # A manifest may list itself among a resource's files; staging it would
-        # make the sealed leaf look like an IMSCP package and decompose forever.
-        if member == _IMSCP_MANIFEST:
-            return
-        # Guard against a manifest path escaping the package (read side) or the
-        # staging dir (write side).
-        src = contained_path(self.directory, member)
-        dst = contained_path(dest_dir, member)
-        if src is None or dst is None or not os.path.isfile(src):
-            return
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copyfile(src, dst)
-        staged.add(member)
-        mapper = next((m for m in DEFAULT_MAPPERS if m.handles(member)), None)
-        if mapper is not None:
-            pending.append((member, mapper))
-
-    def _member_references(self, member, mapper):
-        """The package-local paths an HTML/CSS ``member`` references."""
-        if member not in self._references:
-            self._references[member] = self._extract_references(member, mapper)
-        return self._references[member]
-
-    def _extract_references(self, member, mapper):
-        try:
-            with open(contained_path(self.directory, member), encoding="utf-8") as fh:
-                content = fh.read()
-        except (OSError, UnicodeDecodeError):
-            return []
-        refs = []
-        for ref in mapper.extract(content):
-            if is_external_url(ref) or is_data_uri(ref):
-                continue
-            ref = unquote(ref.split("#")[0].split("?")[0])
-            if ref:
-                refs.append(ref)
-        return refs
-
-
 class IMSCPConversionHandler(ExtensionMatchingHandler):
     """Decompose an IMS Content Package (incl. SCORM) into a native node subtree.
 
@@ -977,7 +895,7 @@ class IMSCPConversionHandler(ExtensionMatchingHandler):
             return False
         try:
             with zipfile.ZipFile(path) as zf:
-                return _IMSCP_MANIFEST in zf.namelist()
+                return IMSCP_MANIFEST in zf.namelist()
         except (OSError, zipfile.BadZipFile):
             return False
 
@@ -989,9 +907,11 @@ class IMSCPConversionHandler(ExtensionMatchingHandler):
                 manifest = parse_imscp_manifest(temp_dir)
             except ET.ParseError as e:
                 raise InvalidFileException(
-                    f"File {path} is not a valid IMSCP package, its {_IMSCP_MANIFEST} could not be parsed: {e}"
+                    f"File {path} is not a valid IMSCP package, its {IMSCP_MANIFEST} could not be parsed: {e}"
                 )
-            children = self._build_nodes(manifest.get("children"), _Package(temp_dir))
+            children = self._build_nodes(
+                manifest.get("children"), IMSCPPackage(temp_dir)
+            )
         # Package-level LOM metadata (tags, description, licence, …) rides on the
         # topmost node; identity keys stay off so they cannot clash with the
         # explicit constructor args below.

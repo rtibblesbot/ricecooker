@@ -1,9 +1,7 @@
 """Conservative classifiers for SCORM/IMSCP webcontent resources.
 
-SCORM buries real content under LMS-communication boilerplate (``pipwerks``
-wrappers, ``LMSInitialize``/``SetValue`` calls), so that boilerplate is
-discounted first — otherwise every SCO looks interactive. Pure functions over
-already-read HTML strings and member names; the caller does the zip I/O.
+LMS-communication boilerplate is discounted first, or every SCO looks interactive.
+Pure functions over already-read HTML and member names; the caller does the I/O.
 """
 
 import re
@@ -11,9 +9,11 @@ import re
 from bs4 import BeautifulSoup
 from le_utils.constants import file_formats
 
+from ricecooker.utils.paths import extract_path_ext
 from ricecooker.utils.references import _attr_value_span
+from ricecooker.utils.references import SCRIPT_TAG_RE
 
-# Script ``src``/name substrings that identify SCORM API boilerplate, matched
+# Script ``src``/name substrings identifying SCORM API boilerplate, matched
 # case-insensitively. These wire a SCO up to the LMS and carry no content.
 SCORM_BOILERPLATE_SCRIPT_HINTS = frozenset(
     {
@@ -27,8 +27,7 @@ SCORM_BOILERPLATE_SCRIPT_HINTS = frozenset(
     }
 )
 
-# SCORM 1.2 / 2004 LMS API calls. An inline script that only makes these is
-# boilerplate; one that also writes a score/status carries assessment meaning.
+# SCORM 1.2 / 2004 LMS API calls. A script making only these is boilerplate.
 SCORM_API_CALL_RE = re.compile(
     r"\b(LMSInitialize|LMSFinish|LMSGetValue|LMSSetValue|LMSCommit|"
     r"Initialize|Terminate|Commit|GetValue|SetValue)\b"
@@ -37,37 +36,29 @@ SCORM_API_CALL_RE = re.compile(
 # Recording a grade is assessment meaning whatever else the script does.
 SCORM_SCORE_RE = re.compile(r"cmi\.core\.score|cmi\.score", re.IGNORECASE)
 
-# Reporting a lesson status is only a signal outside SCORM plumbing: a plain
-# content SCO reports completion on unload as part of that plumbing.
+# A plain content SCO reports completion as part of its plumbing, so a status
+# write only signals assessment outside that plumbing.
 SCORM_STATUS_RE = re.compile(r"cmi\.core\.lesson_status", re.IGNORECASE)
 
-# HotPotatoes quiz engine globals. Their presence means the page IS an exercise.
+# HotPotatoes quiz engine globals; their presence means the page IS an exercise.
+# The generator stamps itself into a <meta content="... Hot Potatoes ...">, so
+# only meta content is searched for the name — matching it anywhere would reject
+# any page that merely writes about hot potatoes.
 _HOTPOTATOES_GLOBALS_RE = re.compile(r"JQuiz|JCloze|JMatch|JMix|JCross", re.IGNORECASE)
-
-# HotPotatoes stamps itself into a <meta> tag ("Created with Hot Potatoes ..."),
-# so only meta content is searched for the name — matching it anywhere in the
-# document would reject any page that merely writes about hot potatoes.
 _HOTPOTATOES_META_RE = re.compile(
     r"<meta\b[^>]*\bcontent\s*=\s*[\"'][^\"']*hot\s+potatoes", re.IGNORECASE
 )
 
 _MEDIA_TAGS = ("video", "audio", "img", "embed", "iframe")
 
-# Only formats that map to a Kolibri content kind of their own. Images are
-# deliberately absent: Kolibri has no image kind, so a page wrapping a single
-# picture is better served as the (static, KPUB-qualifying) article it already is
-# than collapsed to a media node that could not exist.
+# Images are absent deliberately: Kolibri has no image kind, so a page wrapping
+# one picture stays the (KPUB-qualifying) article it already is.
 MEDIA_EXTENSIONS = {
     file_formats.MP4,
     file_formats.WEBM,
     file_formats.MP3,
     file_formats.PDF,
 }
-
-# One ``<script ...>...</script>`` element; group 1 = attributes, group 2 = body.
-_SCRIPT_TAG_RE = re.compile(
-    r"<script\b([^>]*)>(.*?)</script\s*>", re.IGNORECASE | re.DOTALL
-)
 
 
 def _script_src(attrs):
@@ -81,28 +72,19 @@ def _is_boilerplate_src(src):
 
 
 def _is_boilerplate_script(attrs, body):
-    """A script is boilerplate if it is a known wrapper file, or an inline block
-    whose only logic is LMS API/pipwerks plumbing."""
+    """True for a known wrapper file, or an inline block that is only LMS plumbing."""
     src = _script_src(attrs)
     if src is not None:
         return _is_boilerplate_src(src)
-    lower = body.lower()
-    if "pipwerks" in lower:
+    if "pipwerks" in body.lower():
         return True
     return bool(SCORM_API_CALL_RE.search(body))
-
-
-def _iter_scripts(html):
-    """Yield ``(attrs, body)`` for every ``<script>`` element in ``html``."""
-    for match in _SCRIPT_TAG_RE.finditer(html):
-        yield match.group(1), match.group(2)
 
 
 def strip_scorm_boilerplate(html):
     """Return ``html`` with SCORM API boilerplate ``<script>`` tags removed.
 
-    Boilerplate wrapper ``src=`` tags and inline plumbing blocks are dropped so
-    residual interactivity can be judged; content scripts are left in place.
+    Wrapper ``src=`` tags and inline plumbing blocks go; content scripts stay.
     """
 
     def replace(match):
@@ -110,21 +92,24 @@ def strip_scorm_boilerplate(html):
             return ""
         return match.group(0)
 
-    return _SCRIPT_TAG_RE.sub(replace, html)
+    return SCRIPT_TAG_RE.sub(replace, html)
 
 
-def _is_boilerplate_member(name):
-    return name.lower().endswith(".js") and _is_boilerplate_src(name)
+def boilerplate_script_members(names):
+    """The ``.js`` members of ``names`` that are SCORM API wrappers."""
+    return [
+        name
+        for name in names
+        if name.lower().endswith(".js") and _is_boilerplate_src(name)
+    ]
 
 
 def has_assessment_semantics(index_html, mastery_score=None):
     """True when a webcontent resource carries assessment/score/tracking meaning.
 
-    Signals (any one is enough): a HotPotatoes-generated page, an
+    Any one signal is enough: a HotPotatoes-generated page, an
     ``adlcp:masteryscore``, an inline script writing a SCORM score, or a
-    non-boilerplate script writing a lesson status. Boilerplate is discounted for
-    the status signal so a plain SCO that merely talks to the LMS is not mistaken
-    for an exercise.
+    non-boilerplate script writing a lesson status.
     """
     if _HOTPOTATOES_META_RE.search(index_html):
         return True
@@ -134,14 +119,12 @@ def has_assessment_semantics(index_html, mastery_score=None):
         return True
     # Only the index's own inline scripts are inspected — wrapper .js members
     # reference cmi.* as API surface, not as a graded resource's own behaviour.
-    for attrs, body in _iter_scripts(index_html):
+    for match in SCRIPT_TAG_RE.finditer(index_html):
+        attrs, body = match.group(1), match.group(2)
         if _script_src(attrs) is not None:
             continue
-        # A score write means the resource records a grade, even though writing it
-        # necessarily calls the LMS API that would otherwise read as plumbing.
         if SCORM_SCORE_RE.search(body):
             return True
-        # A lesson-status write only counts outside that plumbing.
         if not _is_boilerplate_script(attrs, body) and SCORM_STATUS_RE.search(body):
             return True
     return False
@@ -161,28 +144,25 @@ def _references(tag, media_name):
 def single_media_member(index_html, index_file, files):
     """Return the archive-member path if the resource reduces to one media file.
 
-    A resource qualifies only when, after excluding the index HTML and
-    discounted SCORM boilerplate, exactly one member remains, it has a media
-    extension, and the index body's only meaningful element references it. Any
-    ambiguity (a stylesheet, a second script, a second media file) returns
-    ``None`` — promotion is conservative.
+    Qualifies only when, excluding the index and discounted boilerplate, exactly
+    one member remains, it has a media extension, and the index body's only
+    meaningful element references it. Any ambiguity returns ``None``.
     """
     index_name = index_file.split("/")[-1]
-
-    remaining = []
-    for member in files:
-        name = member.split("/")[-1]
-        if name == index_name:
-            continue
-        if _is_boilerplate_member(member):
-            continue
-        remaining.append(member)
+    boilerplate = set(boilerplate_script_members(files))
+    remaining = [
+        member
+        for member in files
+        if member.split("/")[-1] != index_name and member not in boilerplate
+    ]
 
     if len(remaining) != 1:
         return None
     media = remaining[0]
-    ext = media.rsplit(".", 1)[-1].lower() if "." in media else ""
-    if ext not in MEDIA_EXTENSIONS:
+    try:
+        if extract_path_ext(media) not in MEDIA_EXTENSIONS:
+            return None
+    except ValueError:  # an extension-less member is not media
         return None
 
     body = BeautifulSoup(index_html, "html5lib").find("body")
@@ -191,9 +171,8 @@ def single_media_member(index_html, index_file, files):
     media_tags = body.find_all(_MEDIA_TAGS)
     if len(media_tags) != 1 or not _references(media_tags[0], media.split("/")[-1]):
         return None
-    # The media element must be the resource's sole meaningful content: a page
-    # that also carries prose or interactive controls is a richer article, so it
-    # stays an HTML5/KPUB zip rather than collapsing to a bare media node.
+    # Prose or controls alongside the media element make this a richer article,
+    # which stays an HTML5/KPUB zip rather than collapsing to a bare media node.
     if body.get_text(strip=True):
         return None
     if body.find_all(["a", "form", "input", "button", "select", "textarea"]):
