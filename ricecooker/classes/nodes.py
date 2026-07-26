@@ -182,9 +182,49 @@ class Node(object):
         self.learner_needs = learner_needs or []
         self.role = role
 
+        self._set_license_fields(license, copyright_holder, license_description)
+
+    # License data lives on the node's License object, so it cannot be setattr'd.
+    _LICENSE_METADATA_KEYS = ("license", "copyright_holder", "license_description")
+
+    def _set_license_fields(
+        self, license=None, copyright_holder=None, license_description=None
+    ):
+        """Set the node's License, filling unsupplied fields from its current one."""
+        current = self.license
+        if license is None:
+            license = current
+        if isinstance(license, License) and (copyright_holder or license_description):
+            # Rights named without a license type refine the existing license, so
+            # rebuild it from its id instead of passing the object through untouched.
+            license = license.license_id
+        if current is not None:
+            copyright_holder = copyright_holder or current.copyright_holder
+            license_description = license_description or current.description
         self.set_license(
             license, copyright_holder=copyright_holder, description=license_description
         )
+
+    def set_metadata(self, metadata):
+        """Apply constructor-style metadata fields to an already-built node.
+
+        Only the supplied keys are touched: ``extra_fields`` merges rather than
+        replaces, license fields go through ``set_license``, the rest are set
+        directly.
+        """
+        metadata = dict(metadata)
+        self.extra_fields.update(metadata.pop("extra_fields", None) or {})
+        if "language" in metadata:
+            self.set_language(metadata.pop("language"))
+        license_fields = {
+            key: metadata.pop(key)
+            for key in self._LICENSE_METADATA_KEYS
+            if key in metadata
+        }
+        if license_fields:
+            self._set_license_fields(**license_fields)
+        for key, value in metadata.items():
+            setattr(self, key, value)
 
     def set_language(self, language):
         """Set self.language to internal lang. repr. code from str or Language object."""
@@ -700,6 +740,83 @@ class TreeNode(Node):
     See Node for inherited attributes.
     """
 
+    # Content-node metadata keys describing a node's shape, not its own fields.
+    STRUCTURAL_METADATA_KEYS = frozenset({"children", "files", "kind"})
+
+    # Fields a metadata-built node inherits from the subtree it is built under,
+    # when its own metadata is silent. A folder never carries a license.
+    INHERITED_METADATA_KEYS = ("language",)
+
+    @classmethod
+    def own_metadata_fields(cls, metadata):
+        """The node's own fields in ``metadata``, less the keys describing its shape."""
+        return {
+            key: value
+            for key, value in metadata.items()
+            if key not in cls.STRUCTURAL_METADATA_KEYS
+        }
+
+    @classmethod
+    def from_metadata(cls, metadata, **inherited):
+        """Build a node, and its descendants, from a content-node metadata dict.
+
+        ``kind`` picks the class: absent or ``topic`` gives a folder, anything else
+        a leaf. Every other non-structural key is a constructor argument.
+        """
+        node_class = (
+            TopicNode
+            if metadata.get("kind", content_kinds.TOPIC) == content_kinds.TOPIC
+            else ContentNode
+        )
+        kwargs = {
+            key: value
+            for key, value in inherited.items()
+            if key in node_class.INHERITED_METADATA_KEYS
+        }
+        kwargs.update(cls.own_metadata_fields(metadata))
+        node = node_class(**kwargs)
+        # kind is a class attribute rather than a constructor argument, so a leaf's
+        # concrete kind is assigned after construction.
+        node.kind = metadata.get("kind") or node_class.kind
+        node.add_metadata_content(metadata, inherited)
+        return node
+
+    def add_metadata_children(self, metadata, inherited):
+        """Attach the descendants ``metadata`` describes."""
+        for child_metadata in metadata.get("children") or []:
+            self.add_child(self.from_metadata(child_metadata, **inherited))
+
+    def add_metadata_content(self, metadata, inherited):
+        """Attach what ``metadata`` hangs off this node. A folder takes children."""
+        self.add_metadata_children(metadata, inherited)
+
+    def expand_metadata_tree(self, metadata):
+        """Become the folder of the subtree ``metadata`` describes.
+
+        A decomposer (IMSCP/SCORM) returns a tree of content-node metadata in
+        place of a file, so the node it was declared on turns into a folder and
+        the tree becomes its descendants.
+        """
+        self.kind = content_kinds.TOPIC
+        self.set_metadata(self.own_metadata_fields(metadata))
+        self.add_metadata_children(
+            metadata, {"language": self.language, "license": self.license}
+        )
+        for child in self.children:
+            child.process_metadata_subtree()
+
+    def process_metadata_subtree(self):
+        """Process and validate a metadata-built node and its descendants, leaves first.
+
+        Descendants must process themselves: ``ChannelManager.process_tree``
+        snapshots the node list before calling ``process_files()``, so nodes added
+        during that call are never reached by its walk.
+        """
+        for child in self.children:
+            child.process_metadata_subtree()
+        self.process_files()
+        self.validate()
+
     def get_domain_namespace(self):
         if not self.domain_ns:
             self.domain_ns = self.parent.get_domain_namespace()
@@ -886,8 +1003,8 @@ class ContentNode(TreeNode):
 
     def _validate(self):
         """Validate the content node. Raises InvalidNodeException on failure; returns None."""
-        # A ContentNode handed a tree becomes a topic (see _expand_content_tree); it has
-        # no files/license/uri of its own, so only the base TreeNode validation applies.
+        # A node expanded into a folder (see expand_metadata_tree) has no files,
+        # license or uri of its own, so only the base TreeNode validation applies.
         if self.kind == content_kinds.TOPIC:
             super(ContentNode, self)._validate()
             return
@@ -930,102 +1047,20 @@ class ContentNode(TreeNode):
             self._validate_uri()
         super(ContentNode, self)._validate()
 
-    # File.__init__ has no **kwargs; any non-constructor key (path, license, ...)
-    # must be stripped before File(**d) or it raises TypeError.
-    _FILE_INIT_KEYS = frozenset(
-        {
-            "preset",
-            "language",
-            "default_ext",
-            "source_url",
-            "duration",
-            "original_filename",
-            "filename",
-        }
-    )
+    # A leaf inherits the package's license as well as its language.
+    INHERITED_METADATA_KEYS = ("language", "license")
 
-    def _file_from_metadata(self, metadata_dict):
-        """Build a File from a file-metadata dict, tolerating extra keys."""
-        kwargs = {k: v for k, v in metadata_dict.items() if k in self._FILE_INIT_KEYS}
-        # Inherit the node's language unless the pipeline inferred one of its own
-        # (e.g. a subtitle language extracted from the file itself).
-        kwargs.setdefault("language", self.language)
-        return File(**kwargs)
+    def _file_from_metadata(self, metadata):
+        """Build a File from pipeline file metadata, inheriting the node's language.
 
-    # License-related fields live on the node's License object, not as plain
-    # attributes, so they must go through set_license rather than setattr.
-    _LICENSE_METADATA_KEYS = frozenset(
-        {"license", "license_description", "copyright_holder"}
-    )
-
-    # Keys a descendant's constructor already consumed, and the topic variant that
-    # also drops license fields (a folder never carries one).
-    _CONSTRUCTOR_KEYS = frozenset({"source_id", "title"})
-    _TOPIC_SKIP_KEYS = _CONSTRUCTOR_KEYS | _LICENSE_METADATA_KEYS
-    # Package-level metadata applies to this node, but its identity and kind stay
-    # put — kind may have been clobbered to the package file kind by extraction.
-    _PACKAGE_SKIP_KEYS = _CONSTRUCTOR_KEYS | {"kind"}
-
-    def _apply_content_metadata(self, node, metadata, skip=frozenset()):
-        """Copy scalar content-node metadata onto ``node`` via setattr.
-
-        Structural keys (children/files) and any keys in ``skip`` (e.g. constructor
-        args already consumed) are ignored; ``extra_fields`` is merged, not replaced;
-        license fields are routed through ``set_license``.
+        The pipeline's own language wins where it inferred one (e.g. a subtitle's).
         """
-        self._apply_license_metadata(node, metadata, skip)
-        ignore = skip | self._LICENSE_METADATA_KEYS | {"children", "files"}
-        for key, value in metadata.items():
-            if key in ignore:
-                continue
-            if key == "extra_fields":
-                node.extra_fields.update(value or {})
-            else:
-                setattr(node, key, value)
+        return File(**{"language": self.language, **metadata})
 
-    def _apply_license_metadata(self, node, metadata, skip):
-        """Apply license/copyright fields to ``node`` through ``set_license``.
-
-        Always builds a fresh License rather than editing the node's existing one:
-        descendants are handed the package's License object, so mutating it in
-        place would leak one resource's LOM rights onto every other node.
-        Unsupplied fields are inherited from that existing License.
-        """
-        present = self._LICENSE_METADATA_KEYS & metadata.keys() - skip
-        if not present:
-            return
-        existing = node.license
-
-        def pick(key, attr):
-            value = metadata[key] if key in present else None
-            if value is None and existing is not None:
-                value = getattr(existing, attr)
-            return value
-
-        # LOM may name a holder/description without refining the license type;
-        # keep the node's current type in that case.
-        license_id = pick("license", "license_id")
-        if license_id is None:
-            return
-        node.set_license(
-            license_id,
-            copyright_holder=pick("copyright_holder", "copyright_holder"),
-            description=pick("license_description", "description"),
-        )
-        # Metadata routinely names a license that requires attribution without
-        # naming anyone to attribute. Applying it would fail node validation and
-        # take the whole package down, so keep the license the caller supplied.
-        if (
-            existing is not None
-            and node.license.require_copyright_holder
-            and not node.license.copyright_holder
-        ):
-            config.LOGGER.warning(
-                "Ignoring inferred %s license for %s: it requires a copyright holder and none was given",
-                license_id,
-                node.source_id,
-            )
-            node.license = existing
+    def add_metadata_content(self, metadata, inherited):
+        """A leaf is backed by its own processed files, not by descendants."""
+        for file_metadata in metadata.get("files") or []:
+            self.add_file(self._file_from_metadata(file_metadata))
 
     def _process_uri(self):
         try:
@@ -1042,13 +1077,12 @@ class ContentNode(TreeNode):
             if "content_node_metadata" in metadata_dict:
                 content_metadata.update(metadata_dict.pop("content_node_metadata"))
             file_metadata_dicts.append(metadata_dict)
-        # Children present ⇒ this node becomes a Topic subtree whose files belong to
-        # the leaves, not here. Detect on ``is not None``: a decomposer emits [] when
-        # every resource was rejected, and kind may already be clobbered to the
-        # package's own file kind by the extract stage.
-        children = content_metadata.get("children")
-        if children is not None:
-            self._expand_content_tree(content_metadata)
+        # Children present ⇒ this node is the folder of a decomposed subtree whose
+        # files belong to the leaves. Test ``is not None``: a decomposer emits [] when
+        # every resource was rejected, and the extract stage may already have merged
+        # the package file's own kind over the decomposer's.
+        if content_metadata.get("children") is not None:
+            self.expand_metadata_tree(content_metadata)
             return
         for metadata_dict in file_metadata_dicts:
             self.add_file(self._file_from_metadata(metadata_dict))
@@ -1059,60 +1093,7 @@ class ContentNode(TreeNode):
             raise InvalidNodeException(
                 "Inferred kind is different from content node class kind."
             )
-        self._apply_content_metadata(self, content_metadata)
-
-    def _expand_content_tree(self, content_metadata):
-        """Expand a metadata tree into a Topic/Folder subtree of descendant nodes.
-
-        Descendants must self-process: ``ChannelManager.process_tree`` snapshots the
-        node list before running ``process_files()``, so children added here are never
-        visited by that walk and must be processed/validated in place.
-        """
-        self.kind = content_kinds.TOPIC
-        self._apply_content_metadata(
-            self, content_metadata, skip=self._PACKAGE_SKIP_KEYS
-        )
-        for child_dict in content_metadata["children"]:
-            child = self._build_descendant(child_dict)
-            self.add_child(child)
-            self._process_descendant(child)
-
-    def _process_descendant(self, node):
-        # Post-order: process leaves before the topics that contain them.
-        for grandchild in node.children:
-            self._process_descendant(grandchild)
-        node.process_files()
-        # ContentNode.process_files() already validates; topics do not, so validate them.
-        if isinstance(node, TopicNode):
-            node.validate()
-
-    def _build_descendant(self, node_dict):
-        """Build a TopicNode or leaf ContentNode (unprocessed) from a tree dict.
-
-        A topic carries no concrete leaf ``kind`` (only ``children``, possibly
-        empty); a leaf always names its ``kind``.
-        """
-        kind = node_dict.get("kind")
-        if kind is None or kind == content_kinds.TOPIC:
-            topic = TopicNode(
-                source_id=node_dict["source_id"], title=node_dict["title"]
-            )
-            for child_dict in node_dict.get("children") or []:
-                topic.add_child(self._build_descendant(child_dict))
-            # Topics carry no license: attaching one from a folder's LOM rights
-            # would fail validation whenever it needs a copyright holder.
-            self._apply_content_metadata(topic, node_dict, skip=self._TOPIC_SKIP_KEYS)
-            return topic
-        node = ContentNode(
-            source_id=node_dict["source_id"],
-            title=node_dict["title"],
-            license=self.license,
-        )
-        for file_dict in node_dict.get("files") or []:
-            node.add_file(self._file_from_metadata(file_dict))
-        # source_id/title are already consumed by the constructor above.
-        self._apply_content_metadata(node, node_dict, skip=self._CONSTRUCTOR_KEYS)
-        return node
+        self.set_metadata(content_metadata)
 
     def process_files(self):
         if self.uri:

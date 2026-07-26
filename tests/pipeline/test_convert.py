@@ -40,9 +40,6 @@ from ricecooker.utils.pipeline.convert import KPUBConversionHandler
 from ricecooker.utils.pipeline.convert import PandocMissingError
 from ricecooker.utils.pipeline.exceptions import InvalidFileException
 from ricecooker.utils.references import DEFAULT_MAPPERS
-from ricecooker.utils.scorm import has_assessment_semantics
-from ricecooker.utils.scorm import single_media_member
-from ricecooker.utils.scorm import strip_scorm_boilerplate
 
 # A valid 1x1 PNG, small enough to inline but real enough to pass the CONVERT
 # stage's image verification (so external image refs survive download -> convert).
@@ -835,90 +832,6 @@ class TestContentNodeMetadataTree:
         assert children[0]["files"][0]["filename"] == "v.mp4"
 
 
-class TestSCORMClassifiers:
-    """SCORM-boilerplate discount + assessment / single-media classifiers."""
-
-    def test_strip_scorm_boilerplate(self):
-        html = (
-            "<html><body>"
-            '<script src="SCORM_API_wrapper.js"></script>'
-            "<script>pipwerks.SCORM.init();</script>"
-            '<script src="quiz-logic.js"></script>'
-            "<p>content</p></body></html>"
-        )
-        residual = strip_scorm_boilerplate(html)
-        assert "SCORM_API_wrapper.js" not in residual
-        assert "pipwerks" not in residual
-        assert "quiz-logic.js" in residual
-        assert "<p>content</p>" in residual
-
-    def test_assessment_hotpotatoes_generator(self):
-        html = (
-            '<html><head><meta name="generator" content="Hot Potatoes 7"></head>'
-            "<body><p>Q1</p></body></html>"
-        )
-        assert has_assessment_semantics(html)
-
-    def test_assessment_hotpotatoes_global(self):
-        html = "<html><body><script>var JQuiz={};</script></body></html>"
-        assert has_assessment_semantics(html)
-
-    def test_assessment_cmi_score_write(self):
-        # Writing a score necessarily calls the LMS API that is otherwise
-        # discounted as plumbing; recording a grade still means assessment.
-        html = (
-            "<html><body>"
-            '<script>LMSSetValue("cmi.core.score.raw", 80);</script>'
-            "</body></html>"
-        )
-        assert has_assessment_semantics(html)
-
-    def test_no_assessment_for_pure_boilerplate(self):
-        html = (
-            "<html><body><p>An eXe article page.</p>"
-            '<script src="SCORM_API_wrapper.js"></script>'
-            '<script src="SCOFunctions.js"></script></body></html>'
-        )
-        assert not has_assessment_semantics(html)
-
-    def test_no_assessment_for_boilerplate_lesson_status(self):
-        # A content SCO reporting completion via inline SCORM plumbing is not an
-        # exercise: the boilerplate is discounted before the score grep, so the
-        # lesson_status write does not read as assessment (and the page is kept).
-        html = (
-            "<html><body><p>A lesson.</p>"
-            '<script>pipwerks.SCORM.set("cmi.core.lesson_status", "completed");</script>'
-            "</body></html>"
-        )
-        assert not has_assessment_semantics(html)
-
-    def test_assessment_from_masteryscore(self):
-        # A mastery score on the item is an assessment signal on its own.
-        html = "<html><body><p>Quiz</p></body></html>"
-        assert has_assessment_semantics(html, mastery_score="80")
-
-    def test_single_media_member_returns_media(self):
-        html = '<html><body><video src="video.mp4"></video></body></html>'
-        files = ["index.html", "video.mp4"]
-        assert single_media_member(html, "index.html", files) == "video.mp4"
-
-    def test_single_media_member_none_with_stylesheet(self):
-        html = '<html><body><video src="video.mp4"></video></body></html>'
-        files = ["index.html", "video.mp4", "style.css"]
-        assert single_media_member(html, "index.html", files) is None
-
-    def test_single_media_member_none_with_two_media(self):
-        html = '<html><body><video src="a.mp4"></video></body></html>'
-        files = ["index.html", "a.mp4", "b.mp4"]
-        assert single_media_member(html, "index.html", files) is None
-
-    def test_single_media_member_ignores_boilerplate(self):
-        # A lone media file next to a discounted SCORM wrapper still qualifies.
-        html = '<html><body><video src="clip.mp4"></video></body></html>'
-        files = ["index.html", "clip.mp4", "SCORM_API_wrapper.js"]
-        assert single_media_member(html, "index.html", files) == "clip.mp4"
-
-
 class TestKPUBPromotion:
     """A static-article HTML5 zip is promoted to a KPUB; interactive stays HTML5."""
 
@@ -1028,8 +941,12 @@ def _tree_dict_leaves(node):
         yield node
 
 
-def _build_single_resource_imscp(path, href, index_html, extra_files=None):
-    """Write a minimal one-resource IMSCP package for the media/KPUB rungs."""
+def _build_single_resource_imscp(path, href, index_html, extra_files=None, item_xml=""):
+    """Write a minimal one-resource IMSCP package.
+
+    ``item_xml`` is spliced inside the ``<item>``, for per-item LOM metadata or an
+    ``<adlcp:masteryscore>``.
+    """
     files = {href: index_html}
     file_entries = '<file href="{}"/>'.format(href)
     for name, content in (extra_files or {}).items():
@@ -1038,51 +955,66 @@ def _build_single_resource_imscp(path, href, index_html, extra_files=None):
     files["imsmanifest.xml"] = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<manifest xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2" '
-        'identifier="MAN">'
+        'xmlns:adlcp="http://www.adlnet.org/xsd/adlcp_rootv1p2" identifier="MAN">'
         '<organizations default="ORG">'
         '<organization identifier="ORG"><title>Org</title>'
-        '<item identifier="ITEM" identifierref="RES"><title>Leaf</title></item>'
+        '<item identifier="ITEM" identifierref="RES"><title>Leaf</title>'
+        "{}</item>"
         "</organization></organizations>"
         '<resources><resource identifier="RES" type="webcontent" href="{}">'
         "{}</resource></resources>"
         "</manifest>"
-    ).format(href, file_entries)
+    ).format(item_xml, href, file_entries)
     _create_archive(path, files)
 
 
-def _build_metadata_imscp(path):
-    """One static-article resource carrying per-item LOM metadata."""
-    manifest = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<manifest xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2" '
-        'identifier="MAN">'
-        '<organizations default="ORG"><organization identifier="ORG">'
-        "<title>Org</title>"
-        '<item identifier="ITEM" identifierref="RES"><title>Leaf</title>'
-        "<metadata><lom>"
-        "<general><keyword><langstring>databases</langstring></keyword>"
-        "<description><langstring>A short article.</langstring></description>"
-        "</general>"
-        "<educational><learningResourceType><value>"
-        "<langstring>narrative text</langstring></value></learningResourceType>"
-        "</educational>"
-        "<rights><description><langstring>"
-        "Creative Commons Attribution-ShareAlike 4.0"
-        "</langstring></description></rights>"
-        "<lifeCycle><contribute><role><value><langstring>author</langstring>"
-        "</value></role><entity>FN:Ada Lovelace</entity></contribute></lifeCycle>"
-        "</lom></metadata>"
-        "</item></organization></organizations>"
-        '<resources><resource identifier="RES" type="webcontent" href="article.html">'
-        '<file href="article.html"/></resource></resources></manifest>'
-    )
-    _create_archive(
-        path,
-        {
-            "imsmanifest.xml": manifest,
-            "article.html": "<html><body><h1>Title</h1><p>Prose.</p></body></html>",
-        },
-    )
+_ARTICLE_HTML = "<html><body><h1>Title</h1><p>Prose.</p></body></html>"
+
+# Per-item LOM covering every mapped section: general, educational, rights and
+# lifeCycle contributors.
+_LOM_ITEM_XML = (
+    "<metadata><lom>"
+    "<general><keyword><langstring>databases</langstring></keyword>"
+    "<description><langstring>A short article.</langstring></description>"
+    "</general>"
+    "<educational><learningResourceType><value>"
+    "<langstring>narrative text</langstring></value></learningResourceType>"
+    "</educational>"
+    "<rights><description><langstring>"
+    "Creative Commons Attribution-ShareAlike 4.0"
+    "</langstring></description></rights>"
+    "<lifeCycle><contribute><role><value><langstring>author</langstring>"
+    "</value></role><entity>FN:Ada Lovelace</entity></contribute>"
+    "{}</lifeCycle>"
+    "</lom></metadata>"
+)
+_CONTENT_PROVIDER_XML = (
+    "<contribute><role><value><langstring>content provider</langstring>"
+    "</value></role><entity>ORG:Analytical Press</entity></contribute>"
+)
+
+
+def _expanded_leaf(chef_license, copyright_holder=True):
+    """Expand a one-article LOM package through ContentNode and return its leaf."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "meta.zip")
+        _build_single_resource_imscp(
+            path,
+            "article.html",
+            _ARTICLE_HTML,
+            item_xml=_LOM_ITEM_XML.format(
+                _CONTENT_PROVIDER_XML if copyright_holder else ""
+            ),
+        )
+        node = ContentNode(
+            source_id="pkg",
+            title="Pkg",
+            license=chef_license,
+            uri=path,
+            pipeline=FilePipeline(),
+        )
+        node.process_files()
+    return node.get_non_topic_descendants()[0]
 
 
 class TestIMSCPDecomposition:
@@ -1096,10 +1028,37 @@ class TestIMSCPDecomposition:
             result = FilePipeline().execute(path, skip_cache=True)
         return result[0].content_node_metadata
 
-    def test_assessment_package_rejected(self):
-        # test_quiz is a HotPotatoes JQuiz SCO: its only leaf is rejected, so the
+    def _decompose(self, *args, **kwargs):
+        """Decompose a synthetic one-resource package and return its tree."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "package.zip")
+            _build_single_resource_imscp(path, *args, **kwargs)
+            return (
+                FilePipeline().execute(path, skip_cache=True)[0].content_node_metadata
+            )
+
+    def test_hot_potatoes_package_rejected(self):
+        # test_quiz is a Hot Potatoes JQuiz SCO: its only leaf is rejected, so the
         # tree keeps its topic scaffolding but has no promoted content leaf.
         tree = self._run("test_quiz.zip")
+        assert list(_tree_dict_leaves(tree)) == []
+
+    @pytest.mark.parametrize(
+        "index_html,item_xml",
+        [
+            # A mastery score on the item means the resource is graded.
+            (_ARTICLE_HTML, "<adlcp:masteryscore>80</adlcp:masteryscore>"),
+            # So does writing a score, even though doing so goes through the LMS
+            # API calls that are otherwise discounted as plumbing.
+            (
+                "<html><body><p>Task</p>"
+                '<script>LMSSetValue("cmi.core.score.raw", 80);</script></body></html>',
+                "",
+            ),
+        ],
+    )
+    def test_assessment_resource_rejected(self, index_html, item_xml):
+        tree = self._decompose("page.html", index_html, item_xml=item_xml)
         assert list(_tree_dict_leaves(tree)) == []
 
     def test_eventos_leaves_are_html5_with_own_files(self):
@@ -1135,116 +1094,57 @@ class TestIMSCPDecomposition:
         assert any(n.endswith(".css") for n in names)
         assert any(n.endswith((".gif", ".png", ".jpg")) for n in names)
 
-    def test_synthetic_wrapped_media_becomes_video_node(self, video_file):
+    def test_wrapped_media_becomes_a_media_node(self, video_file):
         with open(video_file.path, "rb") as fh:
             mp4 = fh.read()
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "media.zip")
-            _build_single_resource_imscp(
-                path,
-                "page.html",
-                "<html><body><video src='clip.mp4'></video></body></html>",
-                {"clip.mp4": mp4},
-            )
-            tree = (
-                FilePipeline().execute(path, skip_cache=True)[0].content_node_metadata
-            )
+        tree = self._decompose(
+            "page.html",
+            "<html><body><video src='clip.mp4'></video></body></html>",
+            {"clip.mp4": mp4},
+        )
         leaves = list(_tree_dict_leaves(tree))
         assert len(leaves) == 1
         assert leaves[0]["kind"] == content_kinds.VIDEO
         assert any(f["filename"].endswith(".mp4") for f in leaves[0]["files"])
 
-    def test_synthetic_static_article_becomes_kpub(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "kpub.zip")
-            _build_single_resource_imscp(
-                path,
-                "article.html",
-                "<html><body><h1>Title</h1><p>Prose here.</p>"
-                "<img src='logo.png'></body></html>",
-                {"logo.png": _PNG_1x1},
-            )
-            tree = (
-                FilePipeline().execute(path, skip_cache=True)[0].content_node_metadata
-            )
+    @pytest.mark.parametrize(
+        "index_html",
+        [
+            "<html><body><h1>Title</h1><p>Prose here.</p>"
+            "<img src='pic.png'></body></html>",
+            # Kolibri has no image content kind, so a page wrapping a single
+            # picture stays the article it already is rather than collapsing to a
+            # media node that could not exist.
+            "<html><body><img src='pic.png'></body></html>",
+        ],
+    )
+    def test_static_article_becomes_kpub(self, index_html):
+        tree = self._decompose("article.html", index_html, {"pic.png": _PNG_1x1})
         leaves = list(_tree_dict_leaves(tree))
         assert len(leaves) == 1
         assert leaves[0]["kind"] == content_kinds.DOCUMENT
         assert any(f["preset"] == format_presets.KPUB_ZIP for f in leaves[0]["files"])
 
-    def test_wrapped_image_stays_an_article(self):
-        # Kolibri has no image content kind, so a page wrapping a single picture
-        # must not be promoted to a media node — it would yield a kind-less leaf,
-        # which the tree expander cannot tell apart from an empty folder.
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "image.zip")
-            _build_single_resource_imscp(
-                path,
-                "page.html",
-                "<html><body><img src='pic.png'></body></html>",
-                {"pic.png": _PNG_1x1},
-            )
-            tree = (
-                FilePipeline().execute(path, skip_cache=True)[0].content_node_metadata
-            )
-        leaves = list(_tree_dict_leaves(tree))
-        assert len(leaves) == 1
-        assert leaves[0]["kind"] == content_kinds.DOCUMENT
-
-    def test_leaf_carries_mapped_lom_metadata(self):
-        # LOM educational/rights/general/lifeCycle metadata on a resource maps
-        # onto the decomposed leaf's content-node fields.
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "meta.zip")
-            _build_metadata_imscp(path)
-            tree = (
-                FilePipeline().execute(path, skip_cache=True)[0].content_node_metadata
-            )
-        leaf = next(iter(_tree_dict_leaves(tree)))
-        assert leaf["learning_activities"] == [learning_activities.READ]
-        assert leaf["resource_types"] == [resource_type.TEXTBOOK]
-        assert leaf["license"] == licenses.CC_BY_SA
-        assert leaf["tags"] == ["databases"]
-        assert leaf["author"] == "Ada Lovelace"
-        assert leaf["description"] == "A short article."
-
-    def test_node_expansion_applies_lom_metadata(self):
-        # Through the real consumer: the mapped licence is rebuilt via set_license
-        # (overriding the package default) and the label fields land on the node.
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "meta.zip")
-            _build_metadata_imscp(path)
-            node = ContentNode(
-                source_id="pkg",
-                title="Pkg",
-                license=get_license("CC BY", copyright_holder="Pkg holder"),
-                uri=path,
-                pipeline=FilePipeline(),
-            )
-            node.process_files()
-
-        leaf = next(iter(_leaf_nodes(node)))
+    def test_lom_metadata_lands_on_the_expanded_node(self):
+        # Through the real consumer: LOM general/educational/rights/lifeCycle
+        # metadata maps onto the decomposed leaf's own content-node fields, and its
+        # license (with the copyright holder LOM names) overrides the chef's.
+        leaf = _expanded_leaf(get_license("CC BY", copyright_holder="Pkg holder"))
         assert leaf.license.license_id == licenses.CC_BY_SA
-        assert learning_activities.READ in leaf.learning_activities
+        assert leaf.license.copyright_holder == "Analytical Press"
+        assert leaf.learning_activities == [learning_activities.READ]
+        assert leaf.resource_types == [resource_type.TEXTBOOK]
         assert leaf.tags == ["databases"]
+        assert leaf.author == "Ada Lovelace"
+        assert leaf.description == "A short article."
 
     def test_inferred_license_needing_a_holder_is_ignored(self):
-        # The package's LOM names CC BY-SA, but neither it nor the chef supplies a
-        # copyright holder. Applying it would fail node validation and abort the
-        # whole channel, so the chef's own license is kept instead.
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "meta.zip")
-            _build_metadata_imscp(path)
-            node = ContentNode(
-                source_id="pkg",
-                title="Pkg",
-                license=get_license(licenses.PUBLIC_DOMAIN),
-                uri=path,
-                pipeline=FilePipeline(),
-            )
-            node.process_files()
-
-        leaf = node.children[0].children[0]
+        # The LOM names CC BY-SA but nobody to attribute it to. Applying it would
+        # fail node validation and abort the whole channel, so the chef's license
+        # is kept instead.
+        leaf = _expanded_leaf(
+            get_license(licenses.PUBLIC_DOMAIN), copyright_holder=False
+        )
         assert leaf.kind == content_kinds.DOCUMENT
         assert leaf.license.license_id == licenses.PUBLIC_DOMAIN
 
@@ -1275,9 +1175,6 @@ class TestIMSCPDecomposition:
     def test_end_to_end_node_expansion(self):
         # A ContentNode whose uri is an IMSCP package expands into a TOPIC subtree
         # of processed leaves.
-        from ricecooker.classes.licenses import get_license
-        from ricecooker.classes.nodes import ContentNode
-
         path = os.path.join(_IMSCP_FIXTURE_DIR, "eventos.zip")
         node = ContentNode(
             source_id="eventos",

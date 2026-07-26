@@ -60,12 +60,16 @@ def test_parse_test_quiz(tmp_path):
     ims_dir = _extract("test_quiz.zip", tmp_path)
     manifest = parse_imscp_manifest(ims_dir)
 
+    # The organization holds a single *leaf*, so its level is preserved rather
+    # than collapsed onto the leaf.
     assert len(manifest["children"]) == 1
     org = manifest["children"][0]
     assert org["title"] == "Organization"
     assert len(org["children"]) == 1
 
     leaf = org["children"][0]
+    assert leaf.get("children") is None
+    assert leaf["source_id"] == "ITEM-56C2D9D9-ACA6-40B5-8A5D-A70DB05370FC"
     assert leaf["type"] == "webcontent"
     assert leaf["scormtype"] == "sco"
     assert leaf["index_file"].lower().endswith((".htm", ".html"))
@@ -89,17 +93,8 @@ def test_parse_eventos_nested_tree(tmp_path):
         assert leaf["type"] == "webcontent"
         assert any(f.lower().endswith((".htm", ".html")) for f in leaf["files"])
 
-
-def test_parse_eventos_derives_dependency_files(tmp_path):
-    ims_dir = _extract("eventos.zip", tmp_path)
-    manifest = parse_imscp_manifest(ims_dir)
-
     # RES-...f46 ("El origen del proyecto") declares a <dependency> on COMMON_FILES.
-    leaf = next(
-        leaf
-        for leaf in _manifest_leaves(manifest)
-        if leaf["title"] == "El origen del proyecto"
-    )
+    leaf = next(leaf for leaf in leaves if leaf["title"] == "El origen del proyecto")
     files = leaf["files"]
     # Own file present.
     assert "el_origen_del_proyecto.html" in files
@@ -123,12 +118,9 @@ def test_parse_gitta_deep_tree(tmp_path):
         assert topic["title"] == topic["title"].strip()
         assert topic["title"]
 
-
-def test_collect_metadata_from_gitta(tmp_path):
     # gitta carries LOM <general> (title/language/keyword) and <rights> at the
     # manifest level; the parser lifts them into the node metadata dict.
-    ims_dir = _extract("gitta_ims.zip", tmp_path)
-    metadata = parse_imscp_manifest(ims_dir)["metadata"]
+    metadata = manifest["metadata"]
     assert metadata["title"] == "Databases"
     assert metadata["language"] == "en"
     assert len(metadata["keyword"]) == 15
@@ -194,26 +186,13 @@ def test_collect_metadata_external_location(tmp_path):
     assert metadata["keyword"] == "alpha"
 
 
-def test_leaf_source_id_from_identifier(tmp_path):
-    ims_dir = _extract("test_quiz.zip", tmp_path)
-    manifest = parse_imscp_manifest(ims_dir)
-    leaf = manifest["children"][0]["children"][0]
-    assert leaf["source_id"] == "ITEM-56C2D9D9-ACA6-40B5-8A5D-A70DB05370FC"
-
-
 def test_xml_base_applied_to_index_file(tmp_path):
     # index_file must carry the same xml:base offset as the resource's members,
     # or it resolves to a nonexistent path and the whole resource is dropped.
-    _write_manifest(
-        str(tmp_path),
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<manifest xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2" identifier="M">'
-        '<organizations default="ORG"><organization identifier="ORG"><title>Org</title>'
-        '<item identifier="IT" identifierref="RES"><title>Leaf</title></item>'
-        "</organization></organizations>"
-        '<resources><resource identifier="RES" type="webcontent" '
-        'xml:base="content/" href="start.html"><file href="start.html"/>'
-        "</resource></resources></manifest>",
+    leaf = _parse_leaf(
+        tmp_path,
+        '<resource identifier="RES" type="webcontent" '
+        'xml:base="content/" href="start.html"><file href="start.html"/></resource>',
     )
     assert leaf["index_file"] == "content/start.html"
     assert leaf["files"] == ["content/start.html"]
@@ -229,15 +208,6 @@ def test_masteryscore_element_surfaced(tmp_path):
         item_body="<adlcp:masteryscore>80</adlcp:masteryscore>",
     )
     assert leaf["masteryscore"] == "80"
-
-
-def test_is_qti_resource():
-    # QTI resources are identified by the spec's ``imsqti_`` type prefix.
-    assert is_qti_resource("imsqti_xmlv1p2")
-    assert is_qti_resource("imsqti_test_xmlv1p2")
-    assert not is_qti_resource("webcontent")
-    assert not is_qti_resource("")
-    assert not is_qti_resource(None)
 
 
 def test_qti_resource_files_derived(tmp_path):
@@ -275,17 +245,6 @@ def test_flatten_single_child_topics():
     assert [c["source_id"] for c in flat["children"]] == ["a", "b"]
 
 
-def test_flatten_keeps_leaf_only_topic(tmp_path):
-    # test_quiz's organization holds a single *leaf* (not a topic), so the
-    # organization level must be preserved, not collapsed onto the leaf.
-    ims_dir = _extract("test_quiz.zip", tmp_path)
-    manifest = parse_imscp_manifest(ims_dir)
-    org = manifest["children"][0]
-    assert org["title"] == "Organization"
-    assert len(org["children"]) == 1
-    assert org["children"][0].get("children") is None
-
-
 def test_dangling_reference_dropped(tmp_path):
     # An item pointing at a missing resource is left without files rather than
     # crashing; the tree still parses.
@@ -297,14 +256,8 @@ def test_dangling_reference_dropped(tmp_path):
 def test_cyclic_dependency_does_not_recurse_forever(tmp_path):
     # A malformed/untrusted manifest with a <dependency> cycle (A→B→A) must not
     # send file derivation into unbounded recursion; each member appears once.
-    _write_manifest(
-        str(tmp_path),
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<manifest xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2" identifier="M">'
-        '<organizations default="ORG"><organization identifier="ORG"><title>Org</title>'
-        '<item identifier="IT" identifierref="A"><title>Leaf</title></item>'
-        "</organization></organizations>"
-        "<resources>"
+    leaf = _parse_leaf(
+        tmp_path,
         '<resource identifier="A" type="webcontent" href="a.html">'
         '<file href="a.html"/><dependency identifierref="B"/></resource>'
         '<resource identifier="B" type="webcontent" href="b.html">'

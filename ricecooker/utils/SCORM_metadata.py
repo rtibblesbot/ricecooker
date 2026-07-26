@@ -222,6 +222,26 @@ def _normalize_keywords(keyword):
     return tags or None
 
 
+def _drop_unattributable_license(fields):
+    """Drop an inferred license that requires a copyright holder LOM did not name.
+
+    Applying it would fail node validation and take the whole channel down, so the
+    node keeps whatever license the chef supplied.
+    """
+    # Imported here: ricecooker.classes imports the pipeline, which imports this module.
+    from ricecooker.classes.licenses import get_license
+
+    license_id = fields.get("license")
+    if not license_id or fields.get("copyright_holder"):
+        return
+    if get_license(license_id).require_copyright_holder:
+        LOGGER.warning(
+            "SCORM: ignoring inferred %s license, no copyright holder was named",
+            license_id,
+        )
+        del fields["license"]
+
+
 def metadata_dict_to_content_node_fields(metadata_dict):
     """Convert a raw LOM metadata dict to ``ContentNodeMetadata`` fields, dropping empties."""
     license_id, license_description = infer_license_from_rights(metadata_dict)
@@ -240,4 +260,6 @@ def metadata_dict_to_content_node_fields(metadata_dict):
         "license_description": license_description,
         **extract_lifecycle_contributors(metadata_dict),
     }
-    return {key: value for key, value in fields.items() if value}
+    fields = {key: value for key, value in fields.items() if value}
+    _drop_unattributable_license(fields)
+    return fields
