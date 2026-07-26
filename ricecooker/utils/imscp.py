@@ -115,9 +115,7 @@ def _element_text(elem):
 def contained_path(root, member):
     """Resolve ``member`` under ``root``; return the path, or None if it escapes.
 
-    Manifest hrefs, file paths and metadata locations are all untrusted, so a
-    ``../`` traversal must not read files from outside the extracted package (or
-    write outside the staging directory a leaf is assembled in).
+    Manifest hrefs, file paths and metadata locations are all untrusted.
     """
     root_abs = os.path.abspath(root)
     target = os.path.abspath(os.path.join(root_abs, member))
@@ -153,9 +151,8 @@ def _extract_lom_text(elem, preferred_language):
             return _lom_text(strings[0])
         return [_lom_text(s) for s in strings]
 
-    # A LOM vocabulary term is ``<value><langstring>term</langstring></value>``
-    # (or plain ``<value>term</value>``); recurse so the term text is read, not
-    # the whitespace between ``<value>`` and its child.
+    # A vocabulary term is ``<value>[<langstring>]term...``; recurse so the term
+    # text is read, not the whitespace around it.
     value = elem.find("{*}value")
     if value is not None:
         return _extract_lom_text(value, preferred_language)
@@ -227,9 +224,8 @@ def _collect_field(section, field, preferred_language):
 def collect_metadata(elem, ims_dir):
     """Extract the raw LOM metadata dict from ``elem``'s ``<metadata>``.
 
-    Covers the sections named in :data:`LOM_METADATA_KEYS`. Mapping onto
-    content-node fields is done separately by
-    :func:`~ricecooker.utils.SCORM_metadata.metadata_dict_to_content_node_fields`.
+    Covers the sections named in :data:`LOM_METADATA_KEYS`; mapping onto
+    content-node fields is :mod:`ricecooker.utils.SCORM_metadata`'s job.
     """
     metadata_elem = _resolve_metadata_elem(elem, ims_dir)
     if metadata_elem is None:
@@ -260,9 +256,7 @@ def _walk_items(elem, ims_dir):
     if title:
         node["title"] = title
 
-    # ``<adlcp:masteryscore>`` is a child element of the item (not an attribute),
-    # so it is not captured by the attrib copy above. Surface it for the
-    # assessment classifier, which treats a mastery score as an exercise signal.
+    # A child element, not an attribute, so the attrib copy above misses it.
     mastery = _element_text(elem.find("{*}masteryscore"))
     if mastery:
         node["masteryscore"] = mastery
@@ -281,9 +275,8 @@ def _walk_items(elem, ims_dir):
 def _collect_resources(item, resources, index=1):
     """Resolve resource references onto leaf items; recurse into topics.
 
-    ``index`` is the item's 1-based position among its siblings, used for the
-    ``item{n}`` source_id fallback when an identifier is blank (ported from
-    legacy ricecooker_utils, not core.py).
+    ``index`` is the item's 1-based sibling position, for the ``item{n}``
+    source_id fallback when its identifier is blank.
     """
     item["source_id"] = item.get("identifier") or "item{}".format(index)
 
@@ -305,15 +298,13 @@ def _collect_resources(item, resources, index=1):
         for key, value in resource.attrib.items():
             item.setdefault(_strip_ns(key), value)
         resource_type = resource.get("type")
-        # Both webcontent and QTI resources carry their own file members; QTI
-        # resources are rejected downstream, but deriving their files keeps the
-        # leaf self-describing. Other (unknown) resource types are left as-is.
+        # QTI resources are rejected downstream, but deriving their files keeps
+        # the leaf self-describing. Unknown resource types are left as-is.
         if resource_type == "webcontent" or is_qti_resource(resource_type):
             href = resource.get("href")
             if href:
-                # ``index_file`` must carry the same ``xml:base`` offset that
-                # _derive_files applies to the resource's members, or it will
-                # not resolve to a real extracted path.
+                # Must carry the same ``xml:base`` offset _derive_files applies
+                # to the members, or it resolves to no real extracted path.
                 item["index_file"] = (resource.get(XML_BASE) or "") + href
             item["files"] = _derive_files(resource, resources)
             item.setdefault("scormtype", None)
@@ -378,9 +369,8 @@ def merge_lom_fields(built, fields):
 def flatten_single_child_topics(node):
     """Collapse a topic whose only child is itself a topic into that child.
 
-    IMS packages routinely wrap their whole tree in an ``<organization>`` holding
-    one content-root ``<item>``; merging the two removes the redundant level.
-    Leaf-only topics are left untouched. Ported from ricecooker PR #468.
+    IMS packages routinely wrap the whole tree in an ``<organization>`` holding one
+    content-root ``<item>``. Leaf-only topics are left untouched. From PR #468.
     """
     children = node.get("children")
     if not children:
@@ -402,17 +392,14 @@ def flatten_single_child_topics(node):
 class IMSCPPackage:
     """An extracted package, staging each resource into its own directory.
 
-    A resource's ``<file>`` list is under-declared often enough — shared
-    stylesheets and images left implicit, sometimes no members at all — that the
-    assets its members reference are staged too, bounded to files present in the
-    package. Navigation links are not followed, so a leaf never absorbs the pages
-    it links to.
+    A resource's ``<file>`` list is under-declared often enough that the assets
+    its members reference are staged too, bounded to files present in the package.
+    Navigation links are not followed, so a leaf never absorbs what it links to.
     """
 
     def __init__(self, directory):
         self.directory = directory
-        # Shared assets are staged into many leaves and the package never changes
-        # underneath us, so reference lists are cached across leaves.
+        # Shared assets are staged into many leaves; the package never changes.
         self._references = {}
 
     def stage(self, members, dest_dir):
@@ -433,12 +420,10 @@ class IMSCPPackage:
         member = posixpath.normpath(member.replace("\\", "/"))
         if member in staged:
             return
-        # Staging the manifest would make the sealed leaf look like a package of
-        # its own, and decompose forever.
+        # Staging the manifest would make the leaf a package, decomposing forever.
         if member == IMSCP_MANIFEST:
             return
-        # Manifest paths are untrusted: reject a ``../`` escape from the package
-        # (read side) or the staging dir (write side).
+        # Manifest paths are untrusted: reject a ``../`` escape either way.
         src = contained_path(self.directory, member)
         dst = contained_path(dest_dir, member)
         if src is None or dst is None or not os.path.isfile(src):

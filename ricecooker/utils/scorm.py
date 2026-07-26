@@ -41,9 +41,8 @@ SCORM_SCORE_RE = re.compile(r"cmi\.core\.score|cmi\.score", re.IGNORECASE)
 SCORM_STATUS_RE = re.compile(r"cmi\.core\.lesson_status", re.IGNORECASE)
 
 # HotPotatoes quiz engine globals; their presence means the page IS an exercise.
-# The generator stamps itself into a <meta content="... Hot Potatoes ...">, so
-# only meta content is searched for the name — matching it anywhere would reject
-# any page that merely writes about hot potatoes.
+# The generator stamps itself into a <meta content="... Hot Potatoes ...">, so only
+# meta content is searched — matching anywhere would reject pages about potatoes.
 _HOTPOTATOES_GLOBALS_RE = re.compile(r"JQuiz|JCloze|JMatch|JMix|JCross", re.IGNORECASE)
 _HOTPOTATOES_META_RE = re.compile(
     r"<meta\b[^>]*\bcontent\s*=\s*[\"'][^\"']*hot\s+potatoes", re.IGNORECASE

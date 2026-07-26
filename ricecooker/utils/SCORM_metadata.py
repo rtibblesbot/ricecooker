@@ -14,9 +14,8 @@ from ricecooker.utils.youtube import get_language_with_alpha2_fallback
 
 LOGGER = logging.getLogger(__name__)
 
-# Tags longer than this are rejected by node validation (``Node._validate``), and
-# LOM keywords are routinely whole phrases, so over-long ones are dropped rather
-# than allowed to fail the whole channel.
+# Node validation rejects longer tags, and LOM keywords are routinely whole
+# phrases, so over-long ones are dropped rather than fail the channel.
 MAX_TAG_LENGTH = 30
 
 
@@ -223,12 +222,11 @@ def _normalize_keywords(keyword):
 
 
 def _drop_unattributable_license(fields):
-    """Drop an inferred license that requires a copyright holder LOM did not name.
+    """Drop an inferred license requiring a copyright holder LOM did not name.
 
-    Applying it would fail node validation and take the whole channel down, so the
-    node keeps whatever license the chef supplied.
+    Applying it would fail node validation, so the chef's license is kept.
     """
-    # Imported here: ricecooker.classes imports the pipeline, which imports this module.
+    # Imported here: ricecooker.classes imports the pipeline, which imports this.
     from ricecooker.classes.licenses import get_license
 
     license_id = fields.get("license")
@@ -246,9 +244,7 @@ def metadata_dict_to_content_node_fields(metadata_dict):
     """Convert a raw LOM metadata dict to ``ContentNodeMetadata`` fields, dropping empties."""
     license_id, license_description = infer_license_from_rights(metadata_dict)
     fields = {
-        # title/description/language are single-valued on a content node, but LOM
-        # may supply one per language; take the first rather than handing node
-        # validation a list it rejects.
+        # LOM may supply one per language; these fields are single-valued.
         "title": _first_text(metadata_dict.get("title")),
         "description": _first_text(metadata_dict.get("description")),
         "language": _normalize_language(_first_text(metadata_dict.get("language"))),

@@ -195,8 +195,7 @@ class Node(object):
         if license is None:
             license = current
         if isinstance(license, License) and (copyright_holder or license_description):
-            # Rights named without a license type refine the existing license, so
-            # rebuild it from its id instead of passing the object through untouched.
+            # Rights without a license type refine the existing license.
             license = license.license_id
         if current is not None:
             copyright_holder = copyright_holder or current.copyright_holder
@@ -208,9 +207,8 @@ class Node(object):
     def set_metadata(self, metadata):
         """Apply constructor-style metadata fields to an already-built node.
 
-        Only the supplied keys are touched: ``extra_fields`` merges rather than
-        replaces, license fields go through ``set_license``, the rest are set
-        directly.
+        Only supplied keys are touched: ``extra_fields`` merges rather than
+        replaces, license fields go through ``set_license``.
         """
         metadata = dict(metadata)
         self.extra_fields.update(metadata.pop("extra_fields", None) or {})
@@ -743,8 +741,7 @@ class TreeNode(Node):
     # Content-node metadata keys describing a node's shape, not its own fields.
     STRUCTURAL_METADATA_KEYS = frozenset({"children", "files", "kind"})
 
-    # Fields a metadata-built node inherits from the subtree it is built under,
-    # when its own metadata is silent. A folder never carries a license.
+    # Fields inherited from the subtree root when the metadata is silent.
     INHERITED_METADATA_KEYS = ("language",)
 
     @classmethod
@@ -775,8 +772,7 @@ class TreeNode(Node):
         }
         kwargs.update(cls.own_metadata_fields(metadata))
         node = node_class(**kwargs)
-        # kind is a class attribute rather than a constructor argument, so a leaf's
-        # concrete kind is assigned after construction.
+        # kind is a class attribute, not a constructor argument.
         node.kind = metadata.get("kind") or node_class.kind
         node.add_metadata_content(metadata, inherited)
         return node
@@ -793,9 +789,8 @@ class TreeNode(Node):
     def expand_metadata_tree(self, metadata):
         """Become the folder of the subtree ``metadata`` describes.
 
-        A decomposer (IMSCP/SCORM) returns a tree of content-node metadata in
-        place of a file, so the node it was declared on turns into a folder and
-        the tree becomes its descendants.
+        A decomposer (IMSCP/SCORM) returns a tree of content-node metadata in place
+        of a file, so the node it was declared on holds the tree as descendants.
         """
         self.kind = content_kinds.TOPIC
         self.set_metadata(self.own_metadata_fields(metadata))
@@ -1003,8 +998,7 @@ class ContentNode(TreeNode):
 
     def _validate(self):
         """Validate the content node. Raises InvalidNodeException on failure; returns None."""
-        # A node expanded into a folder (see expand_metadata_tree) has no files,
-        # license or uri of its own, so only the base TreeNode validation applies.
+        # A node expanded into a folder has no files, license or uri of its own.
         if self.kind == content_kinds.TOPIC:
             super(ContentNode, self)._validate()
             return
@@ -1077,10 +1071,9 @@ class ContentNode(TreeNode):
             if "content_node_metadata" in metadata_dict:
                 content_metadata.update(metadata_dict.pop("content_node_metadata"))
             file_metadata_dicts.append(metadata_dict)
-        # Children present ⇒ this node is the folder of a decomposed subtree whose
-        # files belong to the leaves. Test ``is not None``: a decomposer emits [] when
-        # every resource was rejected, and the extract stage may already have merged
-        # the package file's own kind over the decomposer's.
+        # Children ⇒ this node is a decomposed subtree's folder; its files belong
+        # to the leaves. Test ``is not None``: a decomposer emits [] when every
+        # resource was rejected, and the extract stage may have overwritten kind.
         if content_metadata.get("children") is not None:
             self.expand_metadata_tree(content_metadata)
             return

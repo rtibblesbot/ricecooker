@@ -345,10 +345,9 @@ def _empty_body_reason(dom, entry):
 def _kpub_disqualifier(names, index_html, entry):
     """The first reason a KPUB candidate fails the criteria; None ⇒ it qualifies.
 
-    A KPUB is static prose: a non-empty ``entry`` body, no inline ``<script>``,
-    and no ``.js`` or ``.css`` member. ``index_html`` is passed separately from
-    ``names`` so a caller can judge already-transformed markup while the member
-    checks still run over what will ship.
+    A KPUB is static prose: a non-empty ``entry`` body, no inline ``<script>``, no
+    ``.js``/``.css`` member. ``index_html`` is separate from ``names`` so a caller
+    can judge already-transformed markup against the members that will ship.
     """
     if index_html is None:
         return f"{entry} is missing."
@@ -478,9 +477,8 @@ class HTML5ConversionHandler(WebArchiveConversionHandler):
     def _promote_to_kpub(self, temp_dir, entry):
         """Rewrite a static-article HTML5 zip into a KPUB in place; True on promotion.
 
-        SCORM plumbing and stylesheets are stripped rather than treated as
-        disqualifying — neither is content, and a KPUB renders better than an
-        HTML5 zip. Genuine scripting keeps it an HTML5 zip. Judged after
+        SCORM plumbing and stylesheets are stripped rather than disqualifying:
+        neither is content. Genuine scripting keeps the zip HTML5. Judged after
         reference resolution, so downloaded assets count too.
         """
         names = _archive_member_names(temp_dir)
@@ -873,8 +871,7 @@ def _summarize_leaf(sub):
     for fm in sub:
         if fm.preset in _SUPPLEMENTARY_PRESETS:
             continue
-        # merge() round-trips through to_dict(), so a pipeline result always
-        # carries its content-node metadata as a plain dict.
+        # merge() round-trips through to_dict(), so this is always a plain dict.
         metadata = fm.content_node_metadata or {}
         return metadata.get("kind"), files, metadata.get("extra_fields")
     return None, files, None
@@ -912,14 +909,10 @@ class IMSCPConversionHandler(ExtensionMatchingHandler):
             children = self._build_nodes(
                 manifest.get("children"), IMSCPPackage(temp_dir)
             )
-        # Package-level LOM metadata (tags, description, licence, …) rides on the
-        # topmost node; identity keys stay off so they cannot clash with the
-        # explicit constructor args below.
-        manifest_fields = {
-            key: value
-            for key, value in _lom_content_fields(manifest).items()
-            if key not in _STRUCTURAL_METADATA_KEYS
-        }
+        # Package-level LOM rides on the topmost node; identity keys stay off so
+        # they cannot clash with the explicit arguments below.
+        manifest_fields = {}
+        merge_lom_fields(manifest_fields, lom_content_fields(manifest))
         return FileMetadata(
             content_node_metadata=ContentNodeMetadata(
                 kind=content_kinds.TOPIC,
@@ -992,9 +985,8 @@ class IMSCPConversionHandler(ExtensionMatchingHandler):
 
         kind, files, extra_fields = _summarize_leaf(sub)
         if kind is None:
-            # A leaf dict without a kind is indistinguishable from a topic to the
-            # tree expander, so it would silently become an empty folder. Drop it
-            # loudly instead.
+            # The tree expander reads a kind-less leaf as an empty folder, so
+            # drop it loudly instead.
             LOGGER.warning(
                 "IMSCP: skipping resource %s, no content kind could be inferred",
                 source_id,
@@ -1016,12 +1008,10 @@ class IMSCPConversionHandler(ExtensionMatchingHandler):
     def _process_leaf(self, node_dict, package, index_html):
         """Run the resource up the ladder and return its sub-pipeline result.
 
-        A resource that reduces to a single wrapped media file is processed as
-        that file; everything else is sealed into its own HTML5 zip (which the
-        HTML5 handler may in turn promote to a KPUB). Returns ``None`` when the
-        resource cannot be processed — one unusable resource (an entry that is
-        not well-formed HTML, an unreadable media file) drops just that leaf and
-        leaves the rest of the package to decompose.
+        A resource reducing to one wrapped media file is processed as that file;
+        everything else is sealed into its own HTML5 zip, which the HTML5 handler
+        may promote to a KPUB. An unusable resource returns ``None``, dropping just
+        that leaf and leaving the rest of the package to decompose.
         """
         source_id = node_dict.get("source_id")
         media = single_media_member(
@@ -1050,10 +1040,9 @@ class IMSCPConversionHandler(ExtensionMatchingHandler):
         index_file = node_dict["index_file"]
         with tempfile.TemporaryDirectory() as staging:
             package.stage([index_file] + list(node_dict.get("files") or []), staging)
-            # A root ``index.html`` is the entry point Kolibri expects; alias the
-            # index to it only when the index already sits at the staging root,
-            # where the copy resolves the same relative references. A deeper entry
-            # is left where it is — HTML5ConversionHandler records it as a hint.
+            # Alias the index to the root ``index.html`` Kolibri expects, but only
+            # when it already sits at the staging root, where the copy resolves the
+            # same relative references. A deeper entry is recorded as a hint instead.
             if "/" not in index_file and index_file != "index.html":
                 index_src = contained_path(package.directory, index_file)
                 if index_src and os.path.isfile(index_src):

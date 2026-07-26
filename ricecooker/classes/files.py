@@ -72,8 +72,7 @@ class File(object):
         filename=None,
         **kwargs,
     ):
-        # Extra keys are tolerated so a pipeline file-metadata dict can be splatted
-        # straight in; they describe the processed file, not this object.
+        # Extra keys are tolerated so a pipeline file-metadata dict splats in.
         self.preset = preset
         self.set_language(language)
         self.default_ext = default_ext or self.default_ext
