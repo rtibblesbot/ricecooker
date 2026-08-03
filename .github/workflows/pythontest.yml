@@ -34,7 +34,7 @@ jobs:
         os: [windows-latest, ubuntu-latest, macos-latest]
         python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         if: ${{ needs.pre_job.outputs.should_skip != 'true' }}
         with:
           fetch-depth: 0
