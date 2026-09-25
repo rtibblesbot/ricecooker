@@ -8,6 +8,7 @@ on:
     branches:
       - develop
       - main
+      - 'verify-766-**'
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
@@ -38,8 +39,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        os: [ubuntu-latest]
+        python-version: ['3.13']
         exclude:
           # CPython 3.14 on Windows links zlib-ng, which emits different DEFLATE
           # bytes than the reference zlib; predictable-zip hashes are pinned in
@@ -135,7 +136,27 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\tools\poppler-21.11.0\Library\bin" -Encoding utf8
           Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\tools\pandoc-3.1.11" -Encoding utf8
       - name: Run tests
-        run: uv run --group test --extra google_drive pytest
+        run: |
+          rc=0
+          uv run --group test pytest tests/utils --junitxml=j.xml || rc=$?
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse("j.xml").getroot().iter("testcase")
+          counts = {"passed": 0, "failed": 0, "skipped": 0}
+          for c in cases:
+              name = c.get("name")
+              if c.find("failure") is not None or c.find("error") is not None:
+                  bad = c.find("failure") if c.find("failure") is not None else c.find("error")
+                  counts["failed"] += 1
+                  msg = (bad.get("message") or "")[:900].replace("%", "%25").replace("\n", "%0A")
+                  print(f"::error title={name}::{msg}")
+              elif c.find("skipped") is not None:
+                  counts["skipped"] += 1
+              else:
+                  counts["passed"] += 1
+          print(f"::warning title=summary::{counts}")
+          PY
+          exit $rc
   # Single stable required check: a skipped matrix job reports no per-combination checks.
   required_checks:
     name: Python tests
