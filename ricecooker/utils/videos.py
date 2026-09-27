@@ -192,7 +192,8 @@ def _get_stream_duration(fpath_in):
     except ValueError:
         minutes = 0
     try:
-        seconds = int(float(seconds))
+        # The last position is the final frame's start on some ffmpeg versions, short of the end.
+        seconds = round(float(seconds))
     except ValueError:
         seconds = 0
     return (hours * 60 + minutes) * 60 + seconds
