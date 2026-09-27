@@ -14,6 +14,7 @@ from fake_session import fake_download_session
 from le_utils.constants import exercises
 from le_utils.constants import format_presets
 from le_utils.constants import licenses
+from test_files import create_test_image
 from test_videos import _clear_ricecookerfilecache
 from vcr_config import my_vcr
 
@@ -605,12 +606,13 @@ def test_perseus_failed_image_download_fails_question(item, full_path):
 
 
 def test_perseus_failed_data_image_names_mimetype_not_payload():
-    payload = base64.b64encode(b"<svg xmlns='http://www.w3.org/2000/svg'/>").decode()
+    payload = base64.b64encode(b"<svg xmlns='http://www.w3.org/2000/svg'>").decode()
     item = _perseus_item(f"![](data:image/svg+xml;base64,{payload})")
     q = PerseusQuestion("q", item, ka_language="en")
     with pytest.raises(InvalidNodeException) as excinfo:
         q.process_question()
-    assert str(excinfo.value).endswith("data:image/svg+xml: invalid image")
+    assert "image data:image/svg+xml: SVG file did not pass" in str(excinfo.value)
+    assert payload not in str(excinfo.value)
 
 
 def test_perseus_whole_string_graphie_is_downloaded_and_rewritten():
@@ -711,6 +713,43 @@ def test_perseus_unpadded_base64_ending_in_n_is_stored_intact():
     uri = "data:image/png;base64," + base64.b64encode(data).decode()
     q = PerseusQuestion("q", _perseus_item(f"![]({uri})"), ka_language="en")
     assert q.process_question() == [hashlib.md5(data).hexdigest() + ".png"]
+
+
+_SVG = b"<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/>"
+
+
+def _stored_image(fmt, ext):
+    uri, md5 = create_test_image(fmt)
+    return uri, f"{md5}.{ext}"
+
+
+@pytest.mark.parametrize(
+    "make_question",
+    [
+        lambda md: SingleSelectQuestion("s", md, "a", ["a", "b"]),
+        lambda md: PerseusQuestion("p", _perseus_item(md), ka_language="en"),
+    ],
+    ids=["single-select", "perseus"],
+)
+@pytest.mark.parametrize(
+    "uri,filename",
+    [
+        (
+            "data:image/svg+xml;base64," + base64.b64encode(_SVG).decode(),
+            hashlib.md5(_SVG).hexdigest() + ".svg",
+        ),
+        _stored_image("PNG", "png"),
+        _stored_image("JPEG", "jpg"),
+        _stored_image("GIF", "gif"),
+    ],
+    ids=["svg", "png", "jpeg", "gif"],
+)
+def test_base64_question_image_is_stored(make_question, uri, filename):
+    q = make_question(f"![]({uri})")
+    assert q.process_question() == [filename]
+    text = q.raw_data if isinstance(q, PerseusQuestion) else q.question
+    assert exercises.CONTENT_STORAGE_FORMAT.format(filename) in text
+    assert uri not in text
 
 
 # Test exercise images

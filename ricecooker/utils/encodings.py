@@ -1,6 +1,9 @@
 import base64
+import codecs
 import mimetypes
 import re
+
+import chardet
 
 BASE64_REGEX_STR = r"data:image\/([A-Za-z]*);base64,((?:[A-Za-z0-9+\/]{4})*(?:[A-Za-z0-9+\/]{2}==|[A-Za-z0-9+\/]{3}=)*)"
 BASE64_REGEX = re.compile(BASE64_REGEX_STR, flags=re.IGNORECASE)
@@ -13,7 +16,7 @@ DATA_URI_BASE64_REGEX = re.compile(
 # Pin extensions for the types single-file-cli emits, so they resolve the same
 # on every supported Python (e.g. image/webp is absent from stdlib mimetypes
 # before 3.11) rather than depending on the interpreter's mimetypes DB.
-_DATA_URI_EXTENSIONS = {
+_MIMETYPE_EXTENSIONS = {
     "image/png": "png",
     "image/jpeg": "jpg",
     "image/gif": "gif",
@@ -22,6 +25,12 @@ _DATA_URI_EXTENSIONS = {
     "font/woff2": "woff2",
     "font/woff": "woff",
     "font/ttf": "ttf",
+    # mimetypes guesses "xsl".
+    "application/xml": "xml",
+    # Absent from mimetypes from 3.12.
+    "application/javascript": "js",
+    # Absent from mimetypes before 3.12.
+    "text/javascript": "js",
 }
 
 
@@ -39,19 +48,54 @@ def get_base64_data_uri(text):
     return DATA_URI_BASE64_REGEX.match(text)
 
 
-def ext_from_data_uri_mimetype(mimetype):
-    """Map a ``data:`` URI mimetype to a file extension (no dot), or None if undeterminable."""
-    if not mimetype:
+_FORMATLESS_TYPES = {"application/octet-stream", "binary/octet-stream", "text/plain"}
+
+
+def mimetype_from_content_type(content_type):
+    if not content_type:
         return None
-    mimetype = mimetype.lower()
-    if mimetype in _DATA_URI_EXTENSIONS:
-        return _DATA_URI_EXTENSIONS[mimetype]
-    # Restrict the guess_extension fallback to image/font so a non-asset
-    # mimetype (e.g. text/plain) is rejected, not decoded to a spurious file.
-    if not mimetype.startswith(("image/", "font/")):
+    return content_type.split(";")[0].strip().lower()
+
+
+def ext_from_content_type(content_type):
+    mimetype = mimetype_from_content_type(content_type)
+    if not mimetype or mimetype in _FORMATLESS_TYPES:
         return None
+    if mimetype in _MIMETYPE_EXTENSIONS:
+        return _MIMETYPE_EXTENSIONS[mimetype]
     guessed = mimetypes.guess_extension(mimetype)
     return guessed.lstrip(".") if guessed else None
+
+
+def ext_from_data_uri_mimetype(mimetype):
+    """Map a ``data:`` URI mimetype to a file extension (no dot), or None if undeterminable."""
+    if not mimetype or not mimetype.lower().startswith(("image/", "font/")):
+        return None
+    return ext_from_content_type(mimetype)
+
+
+_C1_BYTES = re.compile(rb"[\x80-\x9f]")
+
+
+def decode_text(data):
+    try:
+        return data.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError as e:
+        encoding = (
+            chardet.detect(data[e.start : e.start + 4096])["encoding"] or "latin-1"
+        )
+        try:
+            codec = codecs.lookup(encoding).name
+        except LookupError:
+            encoding, codec = "latin-1", "iso8859-1"
+        # chardet names cp1252 only when the sampled bytes include 0x80-0x9F.
+        if codec == "iso8859-1" and _C1_BYTES.search(data):
+            encoding = "cp1252"
+        return data.decode(encoding, errors="surrogateescape"), encoding
+
+
+def encode_text(text, encoding):
+    return text.encode(encoding, errors="surrogateescape")
 
 
 def write_base64_to_file(encoding, fpath_out):

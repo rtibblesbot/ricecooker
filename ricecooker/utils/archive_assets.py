@@ -21,9 +21,13 @@ import shutil
 from collections import deque
 
 from ricecooker.config import LOGGER
+from ricecooker.utils.encodings import decode_text
+from ricecooker.utils.encodings import encode_text
 from ricecooker.utils.paths import extract_path_ext
 from ricecooker.utils.pipeline.exceptions import ExpectedFileException
 from ricecooker.utils.pipeline.exceptions import InvalidFileException
+from ricecooker.utils.pipeline.transfer import NAME_KEPT_EXTENSIONS
+from ricecooker.utils.pipeline.transfer import path_ext_or_none
 from ricecooker.utils.references import DEFAULT_MAPPERS
 from ricecooker.utils.references import is_data_uri
 from ricecooker.utils.references import is_external_url
@@ -120,13 +124,14 @@ class ArchiveProcessor:
     def _process_file(self, source_path, mapper):
         """Download ``source_path``'s external refs and rewrite them in place."""
         try:
-            with open(source_path, encoding="utf-8") as fh:
-                content = fh.read()
-        except (OSError, UnicodeDecodeError) as e:
+            with open(source_path, "rb") as fh:
+                data = fh.read()
+        except OSError as e:
             LOGGER.warning(
                 "Could not read {} for ref scanning: {}".format(source_path, e)
             )
             return
+        content, encoding = decode_text(data)
 
         source_dir = os.path.dirname(source_path)
         rewrote = False
@@ -144,8 +149,8 @@ class ArchiveProcessor:
         rewritten, _urls = mapper.map(content, localize)
         # Only write back when a download replaced a reference.
         if rewrote:
-            with open(source_path, "w", encoding="utf-8") as fh:
-                fh.write(rewritten)
+            with open(source_path, "wb") as fh:
+                fh.write(encode_text(rewritten, encoding))
 
     def _fetch_into(self, url, source_dir):
         """Fetch ``url`` through the pipeline and copy it into ``source_dir``.
@@ -177,7 +182,14 @@ class ArchiveProcessor:
         # has none, so default it to https.
         fetch_url = "https:" + url if url.startswith("//") else url
         try:
-            results = self.pipeline.execute(fetch_url)
+            results = self.pipeline.execute(
+                fetch_url,
+                context={
+                    "asset_ref": True,
+                    "render_html": path_ext_or_none(fetch_url)
+                    not in NAME_KEPT_EXTENSIONS,
+                },
+            )
         except (InvalidFileException, ExpectedFileException) as e:
             LOGGER.warning(
                 "Could not download external resource, leaving reference unrewritten: {} ({})".format(

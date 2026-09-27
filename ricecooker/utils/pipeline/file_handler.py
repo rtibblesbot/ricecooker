@@ -118,7 +118,6 @@ class FileHandler(Handler):
 
     CONTEXT_CLASS: ClassVar[Optional[Type[ContextMetadata]]] = ContextMetadata
 
-    # Subclasses can define this list to specify which exceptions should be caught and reported
     HANDLED_EXCEPTIONS = []
 
     def __init__(self, **context):
@@ -290,7 +289,7 @@ class FileHandler(Handler):
                 config.LOGGER.error(
                     f"\tFailed {self.STAGE} for {path} with kwargs {kwargs}"
                 )
-                raise ExpectedFileException(e) from e
+                raise ExpectedFileException(str(e) or type(e).__name__) from e
             except subprocess.TimeoutExpired as e:
                 raise InvalidFileException(
                     f"{e.cmd[0]} timed out after {e.timeout}s"
