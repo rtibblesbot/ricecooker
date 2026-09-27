@@ -111,6 +111,8 @@ class Test_extract_duration_of_media:
         self, high_res_video, stub_on_path
     ):
         stub_on_path("ffprobe", "echo N/A")
+        print(videos.run_ffmpeg(["-v", "error", "-i", high_res_video.name, "-f", "null", "-"]).stdout)
+        assert False
         assert videos.extract_duration_of_media(high_res_video.name, "mp4") == 1
 
 
