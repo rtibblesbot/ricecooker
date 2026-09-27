@@ -4,8 +4,10 @@ import atexit
 import os
 import re
 import subprocess
+import sys
 import tempfile
-from unittest import mock
+import threading
+import time
 
 import pytest
 from conftest import sample_path
@@ -92,6 +94,25 @@ class Test_check_video_resolution:
         preset = videos.guess_video_preset_by_resolution(high_res_video_webm.name)
         assert preset == format_presets.VIDEO_HIGH_RES
 
+    def test_hung_probe_falls_back_to_low_res(
+        self, low_res_video, stub_on_path, monkeypatch
+    ):
+        stub_on_path("ffprobe")
+        monkeypatch.setattr(videos, "PROBE_TIMEOUT", 1)
+        start = time.monotonic()
+        preset = videos.guess_video_preset_by_resolution(low_res_video.name)
+        assert preset == format_presets.VIDEO_LOW_RES
+        # The stub sleeps 30s, so finishing well inside that means it was killed.
+        assert time.monotonic() - start < 10
+
+
+class Test_extract_duration_of_media:
+    def test_unknown_duration_falls_back_to_decoding(
+        self, high_res_video, stub_on_path
+    ):
+        stub_on_path("ffprobe", "echo N/A")
+        assert videos.extract_duration_of_media(high_res_video.name, "mp4") == 1
+
 
 def get_resolution(videopath):
     """Helper function to get resolution of video at videopath."""
@@ -151,16 +172,19 @@ class Test_compress_video:
             width, height = get_resolution(vout.name)
             assert height == 140, "should be 140 v resolution since max_height set"
 
-    def test_raises_for_bad_file(self):
-        # ffmpeg failure is mocked so the error-mapping path is exercised without
-        # shelling out to a real encoder.
+    def test_raises_for_bad_file(self, bad_video):
         with TempFile(suffix=".mp4") as vout:
-            with mock.patch(
-                "ricecooker.utils.videos.subprocess.check_output",
-                side_effect=subprocess.CalledProcessError(1, "ffmpeg", b"bad input"),
-            ):
-                with pytest.raises(videos.VideoCompressionError):
-                    videos.compress_video("source.mp4", vout.name, overwrite=True)
+            with pytest.raises(videos.VideoCompressionError):
+                videos.compress_video(bad_video.name, vout.name, overwrite=True)
+
+    def test_faststart_stall_raises(self, high_res_video, stub_on_path, monkeypatch):
+        stub_on_path("ffmpeg")
+        monkeypatch.setattr(videos, "STALL_TIMEOUT", 1)
+        with TempFile(suffix=".mp4") as vout:
+            with pytest.raises(subprocess.TimeoutExpired):
+                videos.web_faststart_video(
+                    high_res_video.name, vout.name, overwrite=True
+                )
 
     def test_default_compression_works_webm(self, high_res_video_webm):
         with TempFile(suffix=".webm") as vout:
@@ -215,6 +239,71 @@ class Test_convert_video:
             )
             width, height = get_resolution(vout.name)
             assert height == 200, "should convert .ogv to .mp4 and set 200 v res"
+
+
+class Test_run_ffmpeg:
+    def test_progressing_run_outlives_stall_timeout(self, monkeypatch, high_res_video):
+        monkeypatch.setattr(videos, "STALL_TIMEOUT", 2)
+        # -re reads the looped input in real time, so the decode takes ~5s.
+        result = videos.run_ffmpeg(
+            ["-stream_loop", "4", "-re", "-i", high_res_video.name, "-f", "null", "-"]
+        )
+        assert result.returncode == 0
+        assert "progress=end" in result.stdout
+
+    def test_large_stderr_does_not_stall(self, monkeypatch, high_res_video):
+        monkeypatch.setattr(videos, "STALL_TIMEOUT", 2)
+        result = videos.run_ffmpeg(
+            [
+                "-v",
+                "trace",
+                "-stream_loop",
+                "29",
+                "-i",
+                high_res_video.name,
+                "-f",
+                "null",
+                "-",
+            ]
+        )
+        assert result.returncode == 0
+        assert len(result.stderr) > 65536
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="needs os.mkfifo")
+    def test_stalled_run_is_killed(self, monkeypatch, tmp_path):
+        # 4s of 8kHz s16le audio, then the input goes quiet without closing.
+        fifo = tmp_path / "stalled.pcm"
+        os.mkfifo(fifo)
+        release = threading.Event()
+
+        def feed():
+            with open(fifo, "wb") as fh:
+                fh.write(bytes(64000))
+                fh.flush()
+                # Bounded so a missed stall fails the test instead of hanging it.
+                release.wait(10)
+
+        threading.Thread(target=feed, daemon=True).start()
+        monkeypatch.setattr(videos, "STALL_TIMEOUT", 1)
+        try:
+            with pytest.raises(subprocess.TimeoutExpired):
+                videos.run_ffmpeg(
+                    [
+                        "-f",
+                        "s16le",
+                        "-ar",
+                        "8000",
+                        "-ac",
+                        "1",
+                        "-i",
+                        str(fifo),
+                        "-f",
+                        "null",
+                        "-",
+                    ]
+                )
+        finally:
+            release.set()
 
 
 # Helper class for cross-platform temporary files

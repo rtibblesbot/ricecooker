@@ -2,6 +2,8 @@ import logging
 import os
 import re
 import subprocess
+import threading
+import time
 from typing import Tuple
 
 from le_utils.constants import format_presets
@@ -12,6 +14,65 @@ from .images import ThumbnailGenerationError
 
 LOGGER = logging.getLogger("VideoResource")
 LOGGER.setLevel(logging.DEBUG)
+
+STALL_TIMEOUT = 300
+PROBE_TIMEOUT = 60
+
+
+def run_ffmpeg(args):
+    """Run ffmpeg with ``args``, killing it if its output position stalls for STALL_TIMEOUT seconds.
+
+    Returns a CompletedProcess whose stdout is the last ``-progress`` block; raises
+    subprocess.TimeoutExpired on a stall.
+    """
+    cmd = ["ffmpeg", "-nostats", "-progress", "pipe:1", *args]
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+    )
+    progress = []
+    stderr = []
+    last_advance = time.monotonic()
+
+    def read_progress():
+        nonlocal last_advance
+        position = None
+        for line in proc.stdout:
+            # Keep only the latest report block; a long encode prints thousands.
+            if progress and progress[-1] == "progress=continue\n":
+                progress.clear()
+            progress.append(line)
+            # ffmpeg keeps printing reports while stalled; only a new position is progress.
+            if line.startswith("out_time=") and line != position:
+                position = line
+                last_advance = time.monotonic()
+
+    progress_reader = threading.Thread(target=read_progress, daemon=True)
+    # A full stderr pipe would block ffmpeg and read as a stall.
+    stderr_reader = threading.Thread(
+        target=lambda: stderr.append(proc.stderr.read()), daemon=True
+    )
+    progress_reader.start()
+    stderr_reader.start()
+    stalled = False
+    while progress_reader.is_alive():
+        idle = time.monotonic() - last_advance
+        if idle >= STALL_TIMEOUT:
+            stalled = True
+            proc.kill()
+            break
+        progress_reader.join(STALL_TIMEOUT - idle)
+    returncode = proc.wait()
+    progress_reader.join()
+    stderr_reader.join()
+    output, errors = "".join(progress), "".join(stderr)
+    if stalled:
+        raise subprocess.TimeoutExpired(cmd, STALL_TIMEOUT, output, errors)
+    return subprocess.CompletedProcess(cmd, returncode, output, errors)
 
 
 def guess_video_preset_by_resolution(videopath):
@@ -34,7 +95,9 @@ def guess_video_preset_by_resolution(videopath):
                 "-of",
                 "default=noprint_wrappers=1",
                 str(videopath),
-            ]
+            ],
+            stdin=subprocess.DEVNULL,
+            timeout=PROBE_TIMEOUT,
         )
         LOGGER.debug("ffprobe stream result = {}".format(result))
         pattern = re.compile("width=([0-9]*)[^height]+height=([0-9]*)")
@@ -71,7 +134,9 @@ def extract_thumbnail_from_video(fpath_in, fpath_out, overwrite=False):
                 "-loglevel",
                 "panic",
                 str(fpath_in),
-            ]
+            ],
+            stdin=subprocess.DEVNULL,
+            timeout=PROBE_TIMEOUT,
         )
 
         midpoint = float(re.search("\\d+\\.\\d+", str(result)).group()) / 2
@@ -80,6 +145,9 @@ def extract_thumbnail_from_video(fpath_in, fpath_out, overwrite=False):
         command = [
             "ffmpeg",
             "-y" if overwrite else "-n",
+            # Seeking before -i jumps to the midpoint instead of decoding up to it.
+            "-ss",
+            str(midpoint),
             "-i",
             str(fpath_in),
             "-vf",
@@ -87,8 +155,6 @@ def extract_thumbnail_from_video(fpath_in, fpath_out, overwrite=False):
             "-vcodec",
             "png",
             "-nostats",
-            "-ss",
-            str(midpoint),
             "-vframes",
             "1",
             "-q:v",
@@ -97,8 +163,13 @@ def extract_thumbnail_from_video(fpath_in, fpath_out, overwrite=False):
             "panic",
             str(fpath_out),
         ]
-        subprocess.check_output(command, stderr=subprocess.STDOUT)
-    except subprocess.CalledProcessError as e:
+        subprocess.check_output(
+            command,
+            stdin=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            timeout=PROBE_TIMEOUT,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         raise ThumbnailGenerationError("{}: {}".format(e, e.output))
     except AttributeError:
         raise ThumbnailGenerationError(
@@ -106,20 +177,11 @@ def extract_thumbnail_from_video(fpath_in, fpath_out, overwrite=False):
         )
 
 
-def _get_stream_duration(fpath_in, extension):
-    result = subprocess.run(
-        [
-            "ffmpeg",
-            "-i",
-            "pipe:",
-            "-f",
-            "null",
-            str(fpath_in),
-        ],
-        stderr=subprocess.PIPE,
-    )
-    second_last_line = result.stderr.decode("utf-8").strip().splitlines()[-2]
-    time_code = second_last_line.split(" time=")[1].split(" ")[0]
+def _get_stream_duration(fpath_in):
+    progress = run_ffmpeg(
+        ["-v", "error", "-i", str(fpath_in), "-f", "null", "-"]
+    ).stdout
+    time_code = re.findall(r"^out_time=(\S+)$", progress, re.MULTILINE)[-1]
     hours, minutes, seconds = time_code.split(":")
     try:
         hours = int(hours)
@@ -158,6 +220,8 @@ def extract_duration_of_media(fpath_in, extension):
                     extension,
                     str(fpath_in),
                 ],
+                stdin=subprocess.DEVNULL,
+                timeout=PROBE_TIMEOUT,
             )
             result = result.decode("utf-8").strip()
             try:
@@ -165,7 +229,7 @@ def extract_duration_of_media(fpath_in, extension):
             except ValueError:
                 # This can happen if ffprobe returns N/A for the duration
                 # So instead we try to stream the entire file to get the value
-                return _get_stream_duration(fpath_in, extension)
+                return _get_stream_duration(fpath_in)
     except Exception as ex:
         LOGGER.warning(ex)
         raise ex
@@ -218,7 +282,6 @@ def compress_video(source_file_path, target_file, overwrite=False, **kwargs):
 
     # Common parameters that apply to both formats
     command = [
-        "ffmpeg",
         "-y" if overwrite else "-n",
         "-i",
         source_file_path,
@@ -234,7 +297,6 @@ def compress_video(source_file_path, target_file, overwrite=False, **kwargs):
         "error",
         "-strict",
         "-2",
-        "-stats",
     ]
 
     # Format-specific parameters
@@ -268,9 +330,9 @@ def compress_video(source_file_path, target_file, overwrite=False, **kwargs):
     command.append(target_file)
 
     try:
-        subprocess.check_output(command, stderr=subprocess.STDOUT)
+        run_ffmpeg(command).check_returncode()
     except subprocess.CalledProcessError as e:
-        raise VideoCompressionError("{}: {}".format(e, e.output))
+        raise VideoCompressionError("{}: {}".format(e, e.stderr))
     except (BrokenPipeError, IOError) as e:
         raise VideoCompressionError("{}".format(e))
 
@@ -286,7 +348,6 @@ def web_faststart_video(source_file_path, target_file, overwrite=False):
         )
 
     command = [
-        "ffmpeg",
         "-y" if overwrite else "-n",
         "-i",
         source_file_path,
@@ -296,15 +357,14 @@ def web_faststart_video(source_file_path, target_file, overwrite=False):
         "error",
         "-strict",
         "-2",
-        "-stats",
         "-movflags",
         "faststart",
         target_file,
     ]
     try:
-        subprocess.check_output(command, stderr=subprocess.STDOUT)
+        run_ffmpeg(command).check_returncode()
     except subprocess.CalledProcessError as e:
-        raise VideoCompressionError("{}: {}".format(e, e.output))
+        raise VideoCompressionError("{}: {}".format(e, e.stderr))
     except (BrokenPipeError, IOError) as e:
         raise VideoCompressionError("{}".format(e))
 
@@ -321,7 +381,6 @@ def validate_media_file(file_path: str) -> Tuple[bool, str]:
     """
 
     cmd = [
-        "ffmpeg",
         "-v",
         "error",  # Only show errors
         "-i",
@@ -330,7 +389,7 @@ def validate_media_file(file_path: str) -> Tuple[bool, str]:
         "null",  # Output format null (discards output)
         "-",  # Output to pipe
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = run_ffmpeg(cmd)
 
     if result.returncode != 0:
         return False, f"Failed to decode {file_path}: {result.stderr}"
