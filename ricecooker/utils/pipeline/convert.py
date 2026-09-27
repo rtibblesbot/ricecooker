@@ -6,6 +6,7 @@ both validate and convert files.
 import json
 import os
 import posixpath
+import re
 import shutil
 import subprocess
 import tempfile
@@ -443,6 +444,12 @@ class WebArchiveConversionHandler(ArchiveProcessingBaseHandler):
     def handle_file(
         self, path, audio_settings=None, video_settings=None, entry=None, **seal_kwargs
     ):
+        requested_entry = entry
+        suffix = ""
+        if entry:
+            member = re.split(r"[?#]", entry, maxsplit=1)[0]
+            suffix = entry[len(member) :]
+            entry = posixpath.normpath(member).lstrip("/")
         prepared_path, entry = self._prepare_archive(path, entry)
         try:
             self._convert_archive(
@@ -453,13 +460,17 @@ class WebArchiveConversionHandler(ArchiveProcessingBaseHandler):
                 os.unlink(prepared_path)
         # Mirror Studio: when the entry point is not index.html at the root,
         # record it in extra_fields.options.entry so Kolibri loads it.
-        if entry and entry != "index.html":
-            return FileMetadata(
-                content_node_metadata=ContentNodeMetadata(
-                    extra_fields={"options": {"entry": entry}}
-                )
+        if entry == "index.html" and not suffix:
+            if not requested_entry:
+                return None
+            entry = None
+        else:
+            entry += suffix
+        return FileMetadata(
+            content_node_metadata=ContentNodeMetadata(
+                extra_fields={"options": {"entry": entry}}
             )
-        return None
+        )
 
     def validate_archive(self, path: str, entry=None):
         with self.open_and_verify_archive(path) as zf:
