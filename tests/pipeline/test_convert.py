@@ -2474,6 +2474,26 @@ class TestIMSCPDecomposition:
         ]
         assert _filenames(leaf) == {expected}
 
+    def test_opted_out_package_leaves_media_uncompressed(self):
+        path = sample_path("high_res_sample.mp4")
+        with open(path, "rb") as fh:
+            mp4 = fh.read()
+        files = {
+            "m/page.html": _page("<video src='clip.mp4'></video>"),
+            "m/clip.mp4": mp4,
+        }
+        tree = _decompose_package(
+            [("MEDIA", "m/page.html", ["m/clip.mp4"])],
+            files,
+            pipeline=FilePipeline(default_context=CHEF_DEFAULTS),
+            context={"compress": False},
+        )
+        (leaf,) = _tree_dict_leaves(tree)
+        (expected,) = [
+            f.filename for f in FilePipeline().execute(path, skip_cache=True)
+        ]
+        assert _filenames(leaf) == {expected}
+
     def test_downloaded_cdn_asset_is_shared(self):
         url = "https://cdn.example.org/lib.js"
         files = {
