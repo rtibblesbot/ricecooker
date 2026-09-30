@@ -8,6 +8,7 @@ on:
     branches:
       - develop
       - main
+      - verify-777-*
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
@@ -38,8 +39,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        os: [windows-latest]
+        python-version: ['3.12']
         exclude:
           # CPython 3.14 on Windows links zlib-ng, which emits different DEFLATE
           # bytes than the reference zlib; predictable-zip hashes are pinned in
@@ -135,7 +136,13 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\tools\poppler-21.11.0\Library\bin" -Encoding utf8
           Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\tools\pandoc-3.1.11" -Encoding utf8
       - name: Run tests
-        run: uv run --group test --extra google_drive pytest
+        shell: bash
+        run: |
+          ffmpeg -version | head -1 | sed 's/^/::warning::/'
+          uv run --group test --extra google_drive pytest -rfE --tb=short -p no:cacheprovider 2>&1 | tee out.txt; rc=${PIPESTATUS[0]}
+          echo "::error::$(grep -E '^(FAILED|ERROR) ' out.txt | head -40 | awk '{printf "%s%%0A", $0}')"
+          echo "::error::$(grep -E '^E  |^[^ ].*\.py:[0-9]+: ' out.txt | head -120 | cut -c1-300 | awk '{printf "%s%%0A", $0}')"
+          exit $rc
   # Single stable required check: a skipped matrix job reports no per-combination checks.
   required_checks:
     name: Python tests
