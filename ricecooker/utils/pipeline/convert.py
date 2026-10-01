@@ -1086,7 +1086,12 @@ def _summarize_leaf(sub):
             continue
         # merge() round-trips through to_dict(), so this is always a plain dict.
         metadata = fm.content_node_metadata or {}
-        return metadata.get("kind"), files, metadata.get("extra_fields")
+        extra_fields = dict(metadata.get("extra_fields") or {})
+        options = extra_fields.pop("options", {})
+        options = {key: value for key, value in options.items() if value is not None}
+        if options:
+            extra_fields["options"] = options
+        return metadata.get("kind"), files, extra_fields or None
     return None, files, None
 
 

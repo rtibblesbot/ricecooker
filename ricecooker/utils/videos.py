@@ -300,6 +300,8 @@ def compress_video(source_file_path, target_file, overwrite=False, **kwargs):
         source_file_path,
         "-vf",
         "scale={}".format(scale),
+        "-pix_fmt",
+        "yuv420p",
         "-b:a",
         "32k",
         "-ac",

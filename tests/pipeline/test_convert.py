@@ -227,13 +227,13 @@ def test_archive_no_compression_without_settings(video_file, audio_file):
 )
 def test_hung_ffmpeg_fails_file(sample, context, stub_on_path, monkeypatch):
     stub_on_path("ffmpeg")
-    monkeypatch.setattr(videos, "STALL_TIMEOUT", 1)
+    monkeypatch.setattr(videos, "STALL_TIMEOUT", 2)
     start = time.monotonic()
     with pytest.raises(InvalidFileException):
         FilePipeline(default_context=context).execute(
             sample_path(sample), skip_cache=True
         )
-    assert time.monotonic() - start < 10
+    assert time.monotonic() - start < 4
 
 
 def _compress(handler, path, **settings):
@@ -2200,6 +2200,11 @@ class TestIMSCPDecomposition:
         )
         (leaf,) = _tree_dict_leaves(tree)
         assert leaf["extra_fields"]["options"]["entry"] == href
+
+    @pytest.mark.parametrize("href", ["index.html", "sco/index.html"])
+    def test_index_entry_uploads_no_options(self, href):
+        (leaf,) = _tree_dict_leaves(self._decompose(href, _ARTICLE_HTML))
+        assert "extra_fields" not in leaf
 
     def test_uri_encoded_href_resolves(self):
         tree = self._decompose("my%20page.html", _ARTICLE_HTML)
