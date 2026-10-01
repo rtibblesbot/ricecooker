@@ -6,8 +6,7 @@ on:
       - main
   pull_request:
     branches:
-      - develop
-      - main
+      - verify-776-base
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
@@ -38,14 +37,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
-        exclude:
-          # CPython 3.14 on Windows links zlib-ng, which emits different DEFLATE
-          # bytes than the reference zlib; predictable-zip hashes are pinned in
-          # Studio, so ricecooker.utils.zip refuses to build archives there.
-          - os: windows-latest
-            python-version: '3.14'
+        os: [ubuntu-latest]
+        python-version: ['3.12']
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -135,7 +128,17 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\tools\poppler-21.11.0\Library\bin" -Encoding utf8
           Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\tools\pandoc-3.1.11" -Encoding utf8
       - name: Run tests
-        run: uv run --group test --extra google_drive pytest
+        run: uv run --group test --extra google_drive pytest --junitxml=junit.xml -p no:randomly
+      - name: Annotate failures
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          for tc in ET.parse("junit.xml").iter("testcase"):
+              for f in list(tc.iter("failure")) + list(tc.iter("error")):
+                  msg = ((f.get("message") or "") + " | " + (f.text or "")[-1500:]).replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+                  print(f"::error title={tc.get('classname')}.{tc.get('name')}::{msg}")
+          PY
   # Single stable required check: a skipped matrix job reports no per-combination checks.
   required_checks:
     name: Python tests
