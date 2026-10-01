@@ -1,9 +1,12 @@
+import json
 import logging
 import os
 import re
+import struct
 import subprocess
 import threading
 import time
+from fractions import Fraction
 from typing import Tuple
 
 from le_utils.constants import format_presets
@@ -17,6 +20,7 @@ LOGGER.setLevel(logging.DEBUG)
 
 STALL_TIMEOUT = 300
 PROBE_TIMEOUT = 60
+VP9_MAX_BITS_PER_PIXEL = 0.1
 
 
 def run_ffmpeg(args):
@@ -230,6 +234,26 @@ class VideoCompressionError(Exception):
     """
 
 
+def _vp9_bit_rate(source_file_path, max_height, max_width=None):
+    probe = probe_media(source_file_path) or {}
+    video = next(
+        (s for s in probe.get("streams", []) if s.get("codec_type") == "video"),
+        None,
+    )
+    try:
+        fps = Fraction(video["avg_frame_rate"])
+    except (TypeError, KeyError, ValueError, ZeroDivisionError):
+        return 0
+    width, height = display_size(video)
+    if max_width is not None:
+        scale = min(1, int(max_width) / width)
+    elif max_height == "ih":
+        scale = 1
+    else:
+        scale = min(1, int(max_height) / height)
+    return int(VP9_MAX_BITS_PER_PIXEL * width * height * scale**2 * fps)
+
+
 def compress_video(source_file_path, target_file, overwrite=False, **kwargs):
     """
     Compress and scale video at `source_file_path` using settings provided in `kwargs`.
@@ -276,6 +300,8 @@ def compress_video(source_file_path, target_file, overwrite=False, **kwargs):
         source_file_path,
         "-vf",
         "scale={}".format(scale),
+        "-pix_fmt",
+        "yuv420p",
         "-b:a",
         "32k",
         "-ac",
@@ -290,12 +316,21 @@ def compress_video(source_file_path, target_file, overwrite=False, **kwargs):
 
     # Format-specific parameters
     if is_webm:
+        bit_rate = _vp9_bit_rate(
+            source_file_path,
+            kwargs.get("max_height", config.VIDEO_HEIGHT or "480"),
+            kwargs.get("max_width"),
+        )
         command.extend(
             [
                 "-c:v",
                 "libvpx-vp9",
                 "-b:v",
-                "0",
+                str(bit_rate),
+                "-maxrate",
+                str(bit_rate),
+                "-bufsize",
+                str(2 * bit_rate),
                 "-deadline",
                 "good",
                 "-cpu-used",
@@ -399,3 +434,57 @@ def validate_media_file(file_path: str) -> Tuple[bool, str]:
         return False, line
 
     return True, ""
+
+
+def _ffprobe_json(file_path, *args):
+    try:
+        result = subprocess.check_output(
+            ["ffprobe", "-v", "error", *args, "-of", "json", str(file_path)],
+            stdin=subprocess.DEVNULL,
+            timeout=PROBE_TIMEOUT,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+    return json.loads(result)
+
+
+def probe_media(file_path):
+    return _ffprobe_json(
+        file_path,
+        "-show_entries",
+        "stream=index,codec_type,codec_name,width,height,pix_fmt,bit_rate,avg_frame_rate"
+        ":stream_side_data=rotation",
+    )
+
+
+def display_size(stream):
+    rotation = next(
+        (d["rotation"] for d in stream.get("side_data_list", []) if "rotation" in d),
+        0,
+    )
+    if int(rotation) % 180:
+        return stream["height"], stream["width"]
+    return stream["width"], stream["height"]
+
+
+def probe_packets(file_path):
+    probe = _ffprobe_json(
+        file_path, "-show_entries", "packet=stream_index,size,duration_time"
+    )
+    return None if probe is None else probe.get("packets", [])
+
+
+def is_faststart(file_path):
+    with open(file_path, "rb") as f:
+        while True:
+            header = f.read(8)
+            if len(header) < 8:
+                return False
+            size, box_type = struct.unpack(">I4s", header)
+            if box_type == b"moov":
+                return True
+            if size == 1:
+                size = struct.unpack(">Q", f.read(8))[0] - 8
+            if box_type == b"mdat" or size < 8:
+                return False
+            f.seek(size - 8, os.SEEK_CUR)

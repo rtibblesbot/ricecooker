@@ -6,6 +6,7 @@ both validate and convert files.
 import json
 import os
 import posixpath
+import re
 import shutil
 import subprocess
 import tempfile
@@ -36,6 +37,7 @@ from ricecooker.config import LOGGER
 from ricecooker.exceptions import UnknownFileTypeError
 from ricecooker.utils.archive_dependencies import SharedAssetExtractor
 from ricecooker.utils.audio import AudioCompressionError
+from ricecooker.utils.audio import AudioEncoding
 from ricecooker.utils.audio import compress_audio
 from ricecooker.utils.caching import generate_key
 from ricecooker.utils.imscp import collapse_single_children
@@ -67,8 +69,13 @@ from ricecooker.utils.subtitles import InvalidSubtitleFormatError
 from ricecooker.utils.subtitles import InvalidSubtitleLanguageError
 from ricecooker.utils.subtitles import LANGUAGE_CODE_UNKNOWN
 from ricecooker.utils.videos import compress_video
+from ricecooker.utils.videos import display_size
+from ricecooker.utils.videos import is_faststart
+from ricecooker.utils.videos import probe_media
+from ricecooker.utils.videos import probe_packets
 from ricecooker.utils.videos import validate_media_file
 from ricecooker.utils.videos import VideoCompressionError
+from ricecooker.utils.videos import web_faststart_video
 from ricecooker.utils.youtube import get_language_with_alpha2_fallback
 from ricecooker.utils.zip import create_predictable_zip
 from ricecooker.utils.zip import directory_member_names
@@ -143,18 +150,57 @@ def _seal_directory_to_file(handler, temp_dir, ext):
     os.unlink(processed_zip_path)
 
 
-class VideoCompressionContextMetadata(ContextMetadata):
+def _packet_bits(packets):
+    return 8 * sum(int(p["size"]) for p in packets)
+
+
+class MediaCompressionContextMetadata(ContextMetadata):
+    # Settings keys a file set itself, rather than the pipeline's defaults.
+    explicit_settings: list[str] = field(default_factory=list)
+
+
+class VideoCompressionContextMetadata(MediaCompressionContextMetadata):
     video_settings: Dict[str, Union[str, int]] = field(default_factory=dict)
 
 
 class MediaCompressionHandler(ExtensionMatchingHandler):
-    def get_cache_key(self, path, ffmpeg_settings=None) -> str:
+    MEDIA = None
+
+    SETTINGS_KEY = None
+
+    def get_file_kwargs(self, context):
+        return [
+            {
+                "ffmpeg_settings": getattr(context, self.SETTINGS_KEY),
+                "reencode": self.SETTINGS_KEY in context.explicit_settings,
+            }
+        ]
+
+    def get_cache_key(self, path, ffmpeg_settings=None, reencode=False) -> str:
         return generate_key(
             "COMPRESSED",
             self.normalize_path(path),
             settings=ffmpeg_settings or {},
             default=" (default compression)",
         )
+
+    def verify(self, path):
+        is_valid, error = validate_media_file(path)
+        if not is_valid:
+            raise InvalidFileException(
+                f"{self.MEDIA} file did not pass verification: {error}"
+            )
+
+    @contextmanager
+    def write_compressed(self, extension):
+        try:
+            with self.write_file(extension) as temp_outfile:
+                yield temp_outfile
+        except InvalidFileException as e:
+            # write_file's error masks the compressor's.
+            if e.__context__ is not None:
+                raise e.__context__ from None
+            raise
 
 
 class VideoCompressionHandler(MediaCompressionHandler):
@@ -167,6 +213,10 @@ class VideoCompressionHandler(MediaCompressionHandler):
 
     CONTEXT_CLASS = VideoCompressionContextMetadata
 
+    MEDIA = "Video"
+
+    SETTINGS_KEY = "video_settings"
+
     SUPPORTED_VIDEO_EXTS = {
         file_formats.MP4,
         file_formats.WEBM,
@@ -176,34 +226,98 @@ class VideoCompressionHandler(MediaCompressionHandler):
         CONVERTIBLE_FORMATS[format_presets.VIDEO_HIGH_RES]
     )
 
+    CODECS = {
+        file_formats.MP4: {"h264"},
+        file_formats.WEBM: {"vp8", "vp9"},
+    }
+
+    # compress_video's crf 32 H.264 output reaches ~0.08. libvpx overshoots
+    # VP9_MAX_BITS_PER_PIXEL 2x at 30 frames and 3.4x at 10, so webm clips under
+    # ~30 frames re-encode on every pass; a higher limit would pass 8 Mbps 720p30.
+    MAX_BITS_PER_PIXEL = {"h264": 0.15, "vp8": 0.25, "vp9": 0.25}
+
+    PIXEL_FORMATS = {"yuv420p", "yuvj420p"}
+
+    AUDIO_CODECS = {
+        file_formats.MP4: {"aac"},
+        file_formats.WEBM: {"opus", "vorbis"},
+    }
+
+    # YouTube's m4a audio is ~130 kbps.
+    MAX_AUDIO_BIT_RATE = 160000
+
     HANDLED_EXCEPTIONS = [VideoCompressionError]
 
-    def get_file_kwargs(self, context):
-        return [{"ffmpeg_settings": context.video_settings}]
+    def _audio_bit_rate(self, stream, packets):
+        if stream.get("bit_rate"):
+            return int(stream["bit_rate"])
+        # Matroska/WebM streams carry no bit_rate.
+        duration = sum(float(p.get("duration_time", 0)) for p in packets)
+        return _packet_bits(packets) / duration if duration else 0
 
-    def handle_file(self, path, ffmpeg_settings=None):
+    def is_compliant(self, path, ext, max_height=None, max_width=None, **settings):
+        streams = (probe_media(path) or {}).get("streams", [])
+        video = next((s for s in streams if s.get("codec_type") == "video"), None)
+        if video is None:
+            return False
+        width, height = display_size(video)
+        if max_width is not None:
+            fits = width <= int(max_width)
+        else:
+            fits = height <= int(max_height or config.VIDEO_HEIGHT or 480)
+        if (
+            not fits
+            or video["codec_name"] not in self.CODECS[ext]
+            or video.get("pix_fmt") not in self.PIXEL_FORMATS
+        ):
+            return False
+        packets = probe_packets(path) or []
+
+        def stream_packets(stream):
+            return [p for p in packets if p["stream_index"] == stream["index"]]
+
+        for stream in streams:
+            if stream.get("codec_type") == "audio" and (
+                stream.get("codec_name") not in self.AUDIO_CODECS[ext]
+                or not 0
+                < self._audio_bit_rate(stream, stream_packets(stream))
+                <= self.MAX_AUDIO_BIT_RATE
+            ):
+                return False
+        video_packets = stream_packets(video)
+        if not video_packets:
+            return False
+        bits_per_pixel = _packet_bits(video_packets) / (
+            video["width"] * video["height"] * len(video_packets)
+        )
+        return bits_per_pixel <= self.MAX_BITS_PER_PIXEL[video["codec_name"]]
+
+    def handle_file(self, path, ffmpeg_settings=None, reencode=False):
         ffmpeg_settings = ffmpeg_settings or {}
 
         input_ext = extract_path_ext(path)
 
-        if input_ext in self.SUPPORTED_VIDEO_EXTS:
-            output_ext = input_ext
-            if not ffmpeg_settings:
-                # No compression settings provided, just validate the file.
-                is_valid, error = validate_media_file(path)
-                if not is_valid:
-                    raise InvalidFileException(
-                        f"Video file did not pass verification: {error}"
-                    )
-                return
-        else:
+        if input_ext not in self.SUPPORTED_VIDEO_EXTS:
             output_ext = file_formats.WEBM
+            ffmpeg_settings = ffmpeg_settings or {"max_height": "ih"}
+        elif not ffmpeg_settings:
+            self.verify(path)
+            return
+        elif reencode or not self.is_compliant(path, input_ext, **ffmpeg_settings):
+            output_ext = input_ext
+        elif input_ext == file_formats.MP4 and not is_faststart(path):
+            with self.write_file(input_ext) as temp_outfile:
+                web_faststart_video(path, temp_outfile.name, overwrite=True)
+            return
+        else:
+            self.verify(path)
+            return
 
-        with self.write_file(output_ext) as temp_outfile:
+        with self.write_compressed(output_ext) as temp_outfile:
             compress_video(path, temp_outfile.name, overwrite=True, **ffmpeg_settings)
 
 
-class AudioCompressionContextMetadata(ContextMetadata):
+class AudioCompressionContextMetadata(MediaCompressionContextMetadata):
     audio_settings: Dict[str, Union[str, int]] = field(default_factory=dict)
 
 
@@ -217,6 +331,10 @@ class AudioCompressionHandler(MediaCompressionHandler):
 
     CONTEXT_CLASS = AudioCompressionContextMetadata
 
+    MEDIA = "Audio"
+
+    SETTINGS_KEY = "audio_settings"
+
     SUPPORTED_AUDIO_EXTS = {
         file_formats.MP3,
     }
@@ -225,27 +343,36 @@ class AudioCompressionHandler(MediaCompressionHandler):
 
     HANDLED_EXCEPTIONS = [AudioCompressionError]
 
-    def get_file_kwargs(self, context):
-        return [{"ffmpeg_settings": context.audio_settings}]
+    def is_compliant(self, path, encoding=AudioEncoding.CBR, bit_rate=96, **settings):
+        if encoding is not AudioEncoding.CBR:
+            return False
+        probe = probe_media(path) or {}
+        audio = next(
+            (s for s in probe.get("streams", []) if s.get("codec_type") == "audio"),
+            None,
+        )
+        return (
+            audio is not None
+            and audio.get("codec_name") == "mp3"
+            and audio.get("bit_rate") is not None
+            and int(audio["bit_rate"]) <= bit_rate * 1000
+        )
 
-    def handle_file(self, path, ffmpeg_settings=None):
+    def handle_file(self, path, ffmpeg_settings=None, reencode=False):
         ffmpeg_settings = ffmpeg_settings or {}
 
         ext = extract_path_ext(path)
 
-        if ext in self.SUPPORTED_AUDIO_EXTS:
-            if not ffmpeg_settings:
-                # No compression settings provided, just validate the file.
-                is_valid, error = validate_media_file(path)
-                if not is_valid:
-                    raise InvalidFileException(
-                        f"Audio file did not pass verification: {error}"
-                    )
-                return
+        if ext in self.SUPPORTED_AUDIO_EXTS and (
+            not ffmpeg_settings
+            or (not reencode and self.is_compliant(path, **ffmpeg_settings))
+        ):
+            self.verify(path)
+            return
 
         output_ext = file_formats.MP3
 
-        with self.write_file(output_ext) as temp_outfile:
+        with self.write_compressed(output_ext) as temp_outfile:
             compress_audio(path, temp_outfile.name, overwrite=True, **ffmpeg_settings)
 
 
@@ -442,6 +569,12 @@ class WebArchiveConversionHandler(ArchiveProcessingBaseHandler):
     def handle_file(
         self, path, audio_settings=None, video_settings=None, entry=None, **seal_kwargs
     ):
+        requested_entry = entry
+        suffix = ""
+        if entry:
+            member = re.split(r"[?#]", entry, maxsplit=1)[0]
+            suffix = entry[len(member) :]
+            entry = posixpath.normpath(member).lstrip("/")
         prepared_path, entry = self._prepare_archive(path, entry)
         try:
             self._convert_archive(
@@ -452,13 +585,17 @@ class WebArchiveConversionHandler(ArchiveProcessingBaseHandler):
                 os.unlink(prepared_path)
         # Mirror Studio: when the entry point is not index.html at the root,
         # record it in extra_fields.options.entry so Kolibri loads it.
-        if entry and entry != "index.html":
-            return FileMetadata(
-                content_node_metadata=ContentNodeMetadata(
-                    extra_fields={"options": {"entry": entry}}
-                )
+        if entry == "index.html" and not suffix:
+            if not requested_entry:
+                return None
+            entry = None
+        else:
+            entry += suffix
+        return FileMetadata(
+            content_node_metadata=ContentNodeMetadata(
+                extra_fields={"options": {"entry": entry}}
             )
-        return None
+        )
 
     def validate_archive(self, path: str, entry=None):
         with self.open_and_verify_archive(path) as zf:
@@ -949,7 +1086,12 @@ def _summarize_leaf(sub):
             continue
         # merge() round-trips through to_dict(), so this is always a plain dict.
         metadata = fm.content_node_metadata or {}
-        return metadata.get("kind"), files, metadata.get("extra_fields")
+        extra_fields = dict(metadata.get("extra_fields") or {})
+        options = extra_fields.pop("options", {})
+        options = {key: value for key, value in options.items() if value is not None}
+        if options:
+            extra_fields["options"] = options
+        return metadata.get("kind"), files, extra_fields or None
     return None, files, None
 
 
@@ -1217,11 +1359,15 @@ class IMSCPConversionHandler(HTML5ConversionHandler):
         finally:
             os.unlink(zip_path)
 
-    def _leaf_from_pipeline(self, node_dict, path, context=None, extra_files=()):
+    def _leaf_from_pipeline(self, node_dict, path, context, extra_files=()):
         """The leaf ``path`` backs, or ``None`` to drop just that leaf and keep decomposing."""
         source_id = node_dict.get("source_id")
+        # Empty settings would pick the pipeline's defaults back up.
+        compress = bool(context["audio_settings"] or context["video_settings"])
         try:
-            sub = self.get_pipeline().execute(path, context=context)
+            sub = self.get_pipeline().execute(
+                path, context={**context, "compress": compress}
+            )
         except (InvalidFileException, ExpectedFileException) as e:
             LOGGER.warning(
                 "IMSCP: skipping resource %s, could not process: %s", source_id, e
