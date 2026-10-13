@@ -8,6 +8,7 @@ on:
     branches:
       - develop
       - main
+      - 'verify-776-**'
 env:
   # uv 0.13 rejects the pre-POSIX tar of the PyPDF2 1.26.0 sdist
   UV_LEGACY_TAR_BACKEND: '1'
