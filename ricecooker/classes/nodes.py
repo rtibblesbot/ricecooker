@@ -506,24 +506,45 @@ class Node(object):
             raise InvalidNodeException(error_message)
 
     def _drop_invalid_values(self, field, is_valid, requirement=None):
-        values = getattr(self, field)
         containers = (
             (list, tuple) if field in ("grade_levels", "resource_types") else list
         )
+        setattr(
+            self,
+            field,
+            self._valid_values(
+                field, getattr(self, field), is_valid, requirement, containers
+            ),
+        )
+
+    def _valid_values(self, label, values, is_valid, requirement=None, containers=list):
         self._validate_values(
-            not isinstance(values, containers), f"{field} must be a list"
+            not isinstance(values, containers), f"{label} must be a list"
         )
         kept = []
         for value in values:
             if is_valid(value):
                 kept.append(value)
                 continue
-            message = f"Invalid {field} value {value!r}"
+            message = f"Invalid {label} value {value!r}"
             if requirement:
                 message = f"{message}: {requirement}"
             self._validate_values(config.STRICT, message)
             config.LOGGER.warning(f"{self}: {message}. Dropped it.")
-        setattr(self, field, kept)
+        return kept
+
+    @staticmethod
+    def _is_valid_tag(tag):
+        return isinstance(tag, str) and len(tag) <= config.MAX_TAG_LENGTH
+
+    def _valid_tags(self, label, tags, containers=list):
+        return self._valid_values(
+            label,
+            tags,
+            self._is_valid_tag,
+            f"tags must be strings of {config.MAX_TAG_LENGTH} chars or less",
+            containers,
+        )
 
     def _validate_question(self, question):
         try:
@@ -599,11 +620,7 @@ class Node(object):
         self._validate_values(
             not isinstance(self.extra_fields, dict), "Extra fields is not a dict"
         )
-        self._drop_invalid_values(
-            "tags",
-            lambda tag: isinstance(tag, str) and len(tag) <= config.MAX_TAG_LENGTH,
-            f"tags must be strings of {config.MAX_TAG_LENGTH} chars or less",
-        )
+        self.tags = self._valid_tags("tags", self.tags)
 
         if self.license is not None:
             self._validate_values(
@@ -749,6 +766,9 @@ class TreeNode(Node):
     # Fields inherited from the subtree root when the metadata is silent.
     INHERITED_METADATA_KEYS = ("language",)
 
+    # Last "New Tags" value validated, so re-validation does not warn twice.
+    _validated_new_tags = None
+
     @classmethod
     def own_metadata_fields(cls, metadata):
         """The node's own fields in ``metadata``, less the keys describing its shape."""
@@ -877,6 +897,23 @@ class TreeNode(Node):
             )
         return self.node_id
 
+    def validate_new_tags(self):
+        # Left in node_modifications so the rewritten metadata CSV keeps the user's text.
+        new_tags = self.node_modifications.get("New Tags")
+        if isinstance(new_tags, (list, tuple)) and new_tags != self._validated_new_tags:
+            self._valid_tags("New Tags", new_tags, containers=(list, tuple))
+            self._validated_new_tags = new_tags
+
+    def _new_tags(self):
+        new_tags = self.node_modifications.get("New Tags")
+        if isinstance(new_tags, (list, tuple)):
+            return [tag for tag in new_tags if self._is_valid_tag(tag)]
+        return new_tags
+
+    def _validate(self):
+        super(TreeNode, self)._validate()
+        self.validate_new_tags()
+
     def _truncate_new_title(self):
         new_title = self.node_modifications.get("New Title")
         if isinstance(new_title, str) and len(new_title) > config.MAX_TITLE_LENGTH:
@@ -947,7 +984,7 @@ class TreeNode(Node):
             "files": [
                 f.to_dict() for f in self.files if f and f.filename
             ],  # Filter out failed downloads
-            "tags": self.node_modifications.get("New Tags") or self.tags,
+            "tags": self._new_tags() or self.tags,
             "kind": self.kind,
             "license": None,
             "license_description": None,
@@ -1481,83 +1518,6 @@ class ExerciseNode(ContentNode):
         super(ExerciseNode, self).truncate_fields()
 
 
-class SlideshowNode(ContentNode):
-    """Model representing Slideshows
-
-    Slideshows are sequences of "Slides", a combination of an image and caption.
-    Slides are shown in a specified sequential order.
-
-    Attributes:
-        slideshow_data (list): list of slide metadata dictionaries (optional)
-        files ([<SlideImageFile>]): images associated with slides
-
-    See ContentNode for inherited attributes.
-    """
-
-    kind = content_kinds.SLIDESHOW
-
-    def __init__(self, *args, slideshow_data=None, **kwargs):
-        if slideshow_data:
-            extra_fields = {"slideshow_data": slideshow_data}
-        else:
-            extra_fields = {"slideshow_data": []}
-        # THe Node base class' __init__ method has:
-        #       for f in files or []:
-        #           self.add_file(f)
-        super(SlideshowNode, self).__init__(*args, extra_fields=extra_fields, **kwargs)
-
-    def add_file(self, file_to_add):
-        """
-        Add a the SlideImageFile to the node's files and append slideshow metadata
-        to extra_fields['slideshow_data'] (list).
-        Args: file (SlideshowNode or ThumbnailFile): file model to add to node
-        Returns: None
-        """
-        from .files import SlideImageFile
-        from .files import ThumbnailFile
-
-        assert isinstance(file_to_add, ThumbnailFile) or isinstance(
-            file_to_add, SlideImageFile
-        ), "Files being added must be instances of a subclass of File class"
-
-        if file_to_add not in self.files:
-            filename = file_to_add.get_filename()
-            if filename:
-                checksum, ext = filename.split(".")  # <md5sum(contents)>.[png|jpg|jpeg]
-            else:
-                raise ValueError("filename not available")
-
-            #
-            # Appending to extra_fields is only necessary for SlideImageFile instances
-            if isinstance(file_to_add, SlideImageFile):
-                #
-                # Find the idx of sort_order.next()
-                slideshow_image_files = [
-                    f for f in self.files if isinstance(f, SlideImageFile)
-                ]
-                idx = len(
-                    slideshow_image_files
-                )  # next available index, assuming added in desired order
-                #
-                # Add slideshow data to extra_fields['slideshow_data'] (aka manifest)
-                slideshow_data = self.extra_fields["slideshow_data"]
-                slideshow_data.append(
-                    {
-                        "caption": file_to_add.caption,
-                        "descriptive_text": file_to_add.descriptive_text,
-                        "sort_order": idx,
-                        "checksum": checksum,
-                        "extension": ext,
-                    }
-                )
-                self.extra_fields["slideshow_data"] = slideshow_data
-
-            #
-            # Add node->file link
-            file_to_add.node = self
-            self.files.append(file_to_add)
-
-
 class CustomNavigationNode(ContentNode):
     kind = content_kinds.TOPIC
     required_presets = (format_presets.HTML5_ZIP,)
@@ -1680,6 +1640,9 @@ class StudioContentNode(TreeNode):
     def _truncate_new_title(self):
         pass
 
+    def validate_new_tags(self):
+        pass
+
     def to_dict(self):
         data = {
             "node_id": self.get_node_id().hex if self.parent else "",
@@ -1693,7 +1656,7 @@ class StudioContentNode(TreeNode):
             ]
             del self.overrides["thumbnail"]
         data.update(self.overrides)
-        for field in ("tags", *METADATA_LABEL_CHOICES):
+        for field in ("title", "tags", *METADATA_LABEL_CHOICES):
             if self.overrides.get(field) is not None:
                 data[field] = getattr(self, field)
         return data

@@ -33,8 +33,8 @@ from test_videos import _clear_ricecookerfilecache
 from ricecooker import config
 from ricecooker.chefs import SushiChef
 from ricecooker.classes.files import DocumentFile
+from ricecooker.classes.files import File
 from ricecooker.classes.files import HTMLZipFile
-from ricecooker.classes.files import SlideImageFile
 from ricecooker.classes.files import SubtitleFile
 from ricecooker.classes.files import ThumbnailFile
 from ricecooker.classes.files import VideoFile
@@ -49,7 +49,6 @@ from ricecooker.classes.nodes import ExerciseNode
 from ricecooker.classes.nodes import METADATA_LABEL_CHOICES
 from ricecooker.classes.nodes import Node
 from ricecooker.classes.nodes import RemoteContentNode
-from ricecooker.classes.nodes import SlideshowNode
 from ricecooker.classes.nodes import TopicNode
 from ricecooker.classes.nodes import TreeNode
 from ricecooker.classes.nodes import VideoNode
@@ -377,93 +376,34 @@ def test_jsontrees_perseus_question_without_ka_language_fails_node(
         channel.children[0].validate()
 
 
-""" *********** SLIDESHOW CONTENT NODE TESTS *********** """
+def test_jsontrees_slideshow_node_unsupported(channel):
+    slideshow = dict(
+        kind=content_kinds.SLIDESHOW,
+        source_id="slideshow",
+        title="slideshow",
+        license=get_license("CC BY", copyright_holder="Demo Holdings").as_dict(),
+    )
+    with pytest.raises(
+        NotImplementedError, match="Unexpected node kind found in json data."
+    ):
+        build_tree_from_json(channel, [slideshow])
 
 
-def test_slideshow_node_via_files(channel):
-    slideshow_node = SlideshowNode(
-        title="The Slideshow",
-        description="Slideshow Content Demo",
-        source_id="demo",
-        author="DE Mo",
-        language="en",
-        license=get_license("CC BY", copyright_holder="Demo Holdings"),
+def test_jsontrees_slideshow_image_file_unsupported(channel):
+    document = dict(
+        kind=content_kinds.DOCUMENT,
+        source_id="document",
+        title="document",
+        license=get_license("CC BY", copyright_holder="Demo Holdings").as_dict(),
         files=[
-            SlideImageFile(
-                path="tests/testcontent/samples/thumbnail.jpg",
-                language="en",
-                caption="Demo blocks are neat.",
-                descriptive_text="Demo blocks are neat.",
-            ),
-            SlideImageFile(
-                path="tests/testcontent/samples/thumbnail.jpg",
-                language="en",
-                caption="Touch the demo to learn new things!",
-                descriptive_text="Touch the demo to learn new things!",
-            ),
-            SlideImageFile(
-                path="tests/testcontent/samples/thumbnail.jpg",
-                language="en",
-                caption="Made mostly with Python!",
-                descriptive_text="Made mostly with Python!",
-            ),
-            SlideImageFile(
-                path="tests/testcontent/samples/thumbnail.jpg",
-                language="en",
-                caption="Unlock your potential with this demo.",
-                descriptive_text="Unlock your potential with this demo.",
-            ),
-            ThumbnailFile(
-                path="tests/testcontent/samples/thumbnail.png", language="en"
-            ),
+            {
+                "file_type": file_types.SLIDESHOW_IMAGE,
+                "path": "tests/testcontent/samples/thumbnail.jpg",
+            }
         ],
     )
-    assert slideshow_node
-    assert slideshow_node.kind == "slideshow"
-    assert len(slideshow_node.files) == 5, "missing files"
-    assert slideshow_node.extra_fields, "missing extra_fields"
-    assert "slideshow_data" in slideshow_node.extra_fields, "missing slideshow_data key"
-    slideshow_node.process_files()
-    channel.add_child(slideshow_node)
-    channel.validate()
-    assert slideshow_node.to_dict()  # not ready yet bcs needs ot be part of tree...
-
-
-def test_slideshow_node_via_add_file(channel):
-    slideshow_node = SlideshowNode(
-        title="The Slideshow via add_files",
-        description="Slideshow Content Demo",
-        source_id="demo2",
-        author="DE Mo",
-        language="en",
-        license=get_license("CC BY", copyright_holder="Demo Holdings"),
-        files=[],
-    )
-    slideimg1 = SlideImageFile(
-        path="tests/testcontent/samples/thumbnail.jpg",
-        language="en",
-        caption="Demo blocks are neat.",
-        descriptive_text="Demo blocks are neat.",
-    )
-    slideshow_node.add_file(slideimg1)
-    slideimg2 = SlideImageFile(
-        path="tests/testcontent/samples/thumbnail.jpg",
-        language="en",
-        caption="Touch the demo to learn new things!",
-        descriptive_text="Touch the demo to learn new things!",
-    )
-    slideshow_node.add_file(slideimg2)
-    thumbimg1 = ThumbnailFile(
-        path="tests/testcontent/samples/thumbnail.jpg", language="en"
-    )
-    slideshow_node.add_file(thumbimg1)
-
-    # print(slideshow_node.__dict__)
-    assert slideshow_node
-    assert len(slideshow_node.files) == 3, "missing files"
-
-    channel.add_child(slideshow_node)
-    channel.validate()
+    with pytest.raises(NotImplementedError, match="Unexpected File type"):
+        build_tree_from_json(channel, [document])
 
 
 """ *********** CUSTOM NAVIGATION CONTENT NODE TESTS *********** """
@@ -1943,6 +1883,87 @@ def test_file_upload_name_keeps_dotted_stem(studio, original_filename, expected)
     assert studio.upload_names == [expected]
 
 
+@pytest.mark.parametrize(
+    "original_filename,expected",
+    [
+        ("x" * 10 + "." + "y" * 300, "x" * 10 + "." + "y" * 244),
+        ("Lecture 3.5 " + "b" * 290, "Lecture 3.5 " + "b" * 243),
+        ("Chapter 1. " + "a" * 300 + ".pdf", "Chapter 1. " + "a" * 240 + ".pdf"),
+    ],
+)
+def test_upload_tree_commits_long_file_name(studio, original_filename, expected):
+    node = ContentNode(
+        "app",
+        "App",
+        licenses.CC_BY,
+        uri=sample_path("sample_html.zip"),
+        pipeline=FilePipeline(),
+        copyright_holder="x",
+    )
+    channel = ChannelNode("long-name", "www.learningequality.org", "Long name")
+    channel.add_child(node)
+    manager = ChannelManager(channel)
+    manager.process_tree()
+    (app_file,) = node.files
+    app_file.original_filename = original_filename
+
+    manager.upload_tree()
+
+    (sent,) = [n for n in studio.added_nodes if n["source_id"] == "app"]
+    assert [f["original_filename"] for f in sent["files"]] == [expected]
+
+
+def _perseus_question_with_long_image_name(exercise_image_file):
+    url = "http://h/" + "i" * 300 + ".png"
+    question = PerseusQuestion(
+        "q1", json.dumps({"question": {"content": f"![]({url})"}}), ka_language="en"
+    )
+    with (
+        open(exercise_image_file.path, "rb") as f,
+        fake_download_session({url: f.read()}),
+    ):
+        question.process_question()
+    return question
+
+
+def _sent_question_file_names(studio, source_id):
+    (sent,) = [n for n in studio.added_nodes if n["source_id"] == source_id]
+    return [f["original_filename"] for q in sent["questions"] for f in q["files"]]
+
+
+def test_upload_tree_commits_question_image_with_long_name(
+    studio, channel, exercise_image_file
+):
+    _clear_ricecookerfilecache()
+    question = _perseus_question_with_long_image_name(exercise_image_file)
+    exercise = ExerciseNode(
+        "ex",
+        "ex",
+        license=get_license(licenses.CC_BY, copyright_holder="x"),
+        exercise_data={"m": 1, "n": 1},
+        questions=[question],
+    )
+    channel.add_child(exercise)
+    manager = ChannelManager(channel)
+    manager.process_tree()
+
+    manager.upload_tree()
+
+    assert _sent_question_file_names(studio, "ex") == ["i" * 251 + ".png"]
+
+
+def test_question_truncate_fields_skips_empty_file_entries():
+    question = SingleSelectQuestion("q1", "q", "a", ["a", "b"])
+    long_file = File(
+        preset="exercise_image", filename="f.png", original_filename="o" * 300 + ".png"
+    )
+    question.files += [None, long_file]
+
+    question.truncate_fields()
+
+    assert long_file.original_filename == "o" * 251 + ".png"
+
+
 def test_file_upload_name_replaces_converted_extension(studio, tmp_path):
     cover = str(tmp_path / "Cover 1.2.webp")
     Image.open(sample_path("thumbnail.png")).save(cover)
@@ -2173,6 +2194,7 @@ class FakeStudio:
         self.thumbnail = None
         self.stored = set()
         self.upload_names = []
+        self.added_nodes = []
         self.failing_formats = set()
 
     def post(self, url, data=None, **kwargs):
@@ -2204,7 +2226,17 @@ class FakeStudio:
                 },
             )
         if url == config.add_nodes_url():
-            node_ids = [node["node_id"] for node in payload["content_data"]]
+            nodes = payload["content_data"]
+            if any(
+                len(f["original_filename"] or "") > config.MAX_ORIGINAL_FILENAME_LENGTH
+                for n in nodes
+                for f in n["files"]
+                + [qf for q in n.get("questions", []) for qf in q["files"]]
+            ):
+                # Studio's File.original_filename is a CharField(max_length=255).
+                return _studio_response(500, "Internal server error")
+            self.added_nodes += nodes
+            node_ids = [node["node_id"] for node in nodes]
             return _studio_response(
                 200, {"root_ids": {n: "srv_" + n for n in node_ids}}
             )
@@ -2497,6 +2529,70 @@ def test_dropped_label_warning_names_node_field_and_value(channel, caplog):
     ]
 
 
+@pytest.mark.parametrize("container", [list, tuple])
+def test_validate_drops_an_over_long_new_tag_with_a_warning(channel, caplog, container):
+    long_tag = "t" * 31
+    node = TopicNode(
+        "topic",
+        "Topic",
+        node_modifications={"New Tags": container(["short", long_tag, "s2"])},
+    )
+    channel.add_child(node)
+    with (
+        patch("ricecooker.config.STRICT", False),
+        caplog.at_level(logging.WARNING, logger=config.LOGGER.name),
+    ):
+        # Re-validated as ContentNode.process_files() does; warns once.
+        ChannelManager(channel).validate()
+        ChannelManager(channel).validate()
+    assert (node.valid, node.to_dict()["tags"]) == (True, ["short", "s2"])
+    (record,) = caplog.records
+    assert "(topic):" in record.getMessage() and long_tag in record.getMessage()
+
+
+def test_validate_raises_on_an_over_long_new_tag_in_strict_mode(channel):
+    long_tag = "t" * 31
+    node = TopicNode("topic", "Topic", node_modifications={"New Tags": [long_tag]})
+    channel.add_child(node)
+    with (
+        patch("ricecooker.config.STRICT", True),
+        pytest.raises(InvalidNodeException) as raised,
+    ):
+        ChannelManager(channel).validate()
+    assert str(raised.value).startswith(f"{node}: Invalid New Tags value {long_tag!r}")
+
+
+def test_node_with_only_over_long_new_tags_sends_its_own_tags(channel):
+    node = TopicNode(
+        "topic", "Topic", tags=["own"], node_modifications={"New Tags": ["t" * 31]}
+    )
+    channel.add_child(node)
+    with patch("ricecooker.config.STRICT", False):
+        ChannelManager(channel).validate()
+    assert node.to_dict()["tags"] == ["own"]
+
+
+@pytest.mark.parametrize("new_tags", [None, ""])
+def test_validate_leaves_non_list_new_tags_as_given(channel, new_tags):
+    node = TopicNode(
+        "topic", "Topic", tags=["own"], node_modifications={"New Tags": new_tags}
+    )
+    channel.add_child(node)
+    with patch("ricecooker.config.STRICT", True):
+        ChannelManager(channel).validate()
+    assert (node.valid, node.to_dict()["tags"]) == (True, ["own"])
+
+
+def test_studio_content_node_ignores_over_long_new_tags_in_strict_mode(channel):
+    node = RemoteContentNode("0" * 32, source_node_id="1" * 32)
+    channel.add_child(node)
+    with patch("ricecooker.config.STRICT", True):
+        SushiChef().apply_modifications(
+            channel, {node.source_id: {"New Tags": ["t" * 31]}}
+        )
+    assert "tags" not in node.to_dict()
+
+
 @pytest.mark.parametrize("field, valid, invalid", CLEANABLE_VALUES)
 def test_validate_raises_on_an_invalid_metadata_value_in_strict_mode(
     channel, field, valid, invalid
@@ -2594,6 +2690,25 @@ def test_truncate_fields_does_not_warn_for_remote_node_new_title(channel, caplog
     with caplog.at_level(logging.WARNING):
         node.truncate_fields()
     assert "truncating" not in caplog.text
+
+
+@pytest.mark.parametrize("length,warnings", [(200, 0), (201, 1)])
+def test_studio_content_node_title_override_is_cut_to_max_title_length(
+    channel, caplog, length, warnings
+):
+    node = RemoteContentNode("0" * 32, source_node_id="1" * 32, title="x" * length)
+    channel.add_child(node)
+    with caplog.at_level(logging.WARNING):
+        node.truncate_fields()
+    assert len(node.to_dict()["title"]) == min(length, config.MAX_TITLE_LENGTH)
+    assert caplog.text.count("truncating") == warnings
+
+
+def test_studio_content_node_without_title_override_sends_no_title(channel):
+    node = RemoteContentNode("0" * 32, source_node_id="1" * 32)
+    channel.add_child(node)
+    node.truncate_fields()
+    assert "title" not in node.to_dict()
 
 
 def test_truncate_fields_leaves_empty_node_modifications_alone(channel):
