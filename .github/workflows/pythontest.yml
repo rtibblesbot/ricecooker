@@ -139,7 +139,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          uv run --group test --extra google_drive pytest -rfE -p no:cacheprovider 2>&1 | tee out.txt || { { grep -E '^(FAILED|ERROR) |^E  ' out.txt | head -30; head -40 out.txt; tail -40 out.txt; } | while IFS= read -r l; do echo "::error::$l"; done; exit 1; }
+          uv run --group test --extra google_drive pytest -rfE -p no:cacheprovider 2>&1 | tee out.txt || { { grep -E '^(FAILED|ERROR) |^E  ' out.txt | head -30; head -40 out.txt; tail -40 out.txt; } > diag.txt; python3 -c "import sys;t=open('diag.txt',errors='replace').read()[-60000:];print('::error::'+t.replace('%','%25').replace('\\r','').replace('\\n','%0A'))"; exit 1; }
   # Single stable required check: a skipped matrix job reports no per-combination checks.
   required_checks:
     name: Python tests
