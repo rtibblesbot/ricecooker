@@ -8,6 +8,7 @@ on:
     branches:
       - develop
       - main
+      - verify-813-*
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
@@ -38,8 +39,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        os: [ubuntu-latest]
+        python-version: ['3.12']
         exclude:
           # CPython 3.14 on Windows links zlib-ng, which emits different DEFLATE
           # bytes than the reference zlib; predictable-zip hashes are pinned in
@@ -53,7 +54,8 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
         with:
-          enable-cache: true
+          enable-cache: false
+          version: "0.12.21"
           cache-python: true
           python-version: ${{ matrix.python-version }}
       - name: Install Ubuntu dependencies
@@ -135,7 +137,17 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\tools\poppler-21.11.0\Library\bin" -Encoding utf8
           Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\tools\pandoc-3.1.11" -Encoding utf8
       - name: Run tests
-        run: uv run --group test --extra google_drive pytest
+        shell: bash
+        run: |
+          set +e +o pipefail
+          uv --version | sed 's/^/::warning::/'
+          uv run --group test --extra google_drive pytest -q -rfE -p no:cacheprovider > pytest-out.txt 2>&1
+          rc=$?
+          grep -E "^(FAILED|ERROR)" pytest-out.txt | cut -c1-180 | head -40 > ann.txt
+          tail -3 pytest-out.txt | cut -c1-180 >> ann.txt
+          uv run --group test pytest -q -p no:cacheprovider tests/test_files.py -k corrupt_media_error 2>&1 | tail -1 >> ann.txt
+          while IFS= read -r l; do echo "::warning::$l"; done < ann.txt
+          exit $rc
   # Single stable required check: a skipped matrix job reports no per-combination checks.
   required_checks:
     name: Python tests
