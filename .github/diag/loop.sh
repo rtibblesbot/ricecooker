@@ -1,10 +1,10 @@
 #!/bin/bash
 # Throwaway: loop media+convert tests; on a stuck spawned child, sample it.
-LOOPS=${LOOPS:-12}
+LOOPS=${LOOPS:-1}
 hangs=0
 for i in $(seq 1 "$LOOPS"); do
   echo "=== loop $i"
-  uv run --group test pytest -p no:timeout -q -x -p no:cacheprovider tests/media_utils tests/pipeline/test_convert.py > "out-$i.log" 2>&1 &
+  uv run --group test --extra google_drive pytest -p no:timeout -q -p no:cacheprovider > "out-$i.log" 2>&1 &
   uvpid=$!
   while kill -0 $uvpid 2>/dev/null; do
     sleep 5
@@ -13,8 +13,10 @@ for i in $(seq 1 "$LOOPS"); do
     for c in $(pgrep -P "$py"); do
       et=$(ps -o etime= -p "$c" | tr -d ' ')
       secs=$(echo "$et" | awk -F: '{ if (NF==2) print $1*60+$2; else if (NF==3) print $1*3600+$2*60+$3; else print $1 }')
-      if [ "${secs:-0}" -ge 60 ]; then
-        echo "!!! HANG loop $i: child $c of pytest $py, etime $et"
+      cmd=$(ps -o command= -p "$c")
+      lim=150; case "$cmd" in *python*|*pytest*) lim=20;; esac
+      if [ "${secs:-0}" -ge "$lim" ]; then
+        echo "!!! HANG loop $i: child $c of pytest $py, etime $et, cmd $cmd"
         ps -ax -o pid,ppid,pgid,stat,etime,wchan,command | awk -v p="$py" '$1==p || $2==p || $3==p'
         ps -M -p "$c"
         echo "--- sample child"; sample "$c" 3 2>&1 | head -120

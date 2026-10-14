@@ -17,9 +17,30 @@ jobs:
           - {python-version: '3.10', shard: 4}
           - {python-version: '3.10', shard: 5}
           - {python-version: '3.10', shard: 6}
-          - {python-version: '3.12', shard: 1}
-          - {python-version: '3.12', shard: 2}
-          - {python-version: '3.12', shard: 3}
+          - {python-version: '3.10', shard: 7}
+          - {python-version: '3.10', shard: 8}
+          - {python-version: '3.10', shard: 9}
+          - {python-version: '3.10', shard: 10}
+          - {python-version: '3.10', shard: 11}
+          - {python-version: '3.10', shard: 12}
+          - {python-version: '3.10', shard: 13}
+          - {python-version: '3.10', shard: 14}
+          - {python-version: '3.10', shard: 15}
+          - {python-version: '3.10', shard: 16}
+          - {python-version: '3.10', shard: 17}
+          - {python-version: '3.10', shard: 18}
+          - {python-version: '3.10', shard: 19}
+          - {python-version: '3.10', shard: 20}
+          - {python-version: '3.10', shard: 21}
+          - {python-version: '3.10', shard: 22}
+          - {python-version: '3.10', shard: 23}
+          - {python-version: '3.10', shard: 24}
+          - {python-version: '3.10', shard: 25}
+          - {python-version: '3.10', shard: 26}
+          - {python-version: '3.10', shard: 27}
+          - {python-version: '3.10', shard: 28}
+          - {python-version: '3.10', shard: 29}
+          - {python-version: '3.10', shard: 30}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: astral-sh/setup-uv@v7
