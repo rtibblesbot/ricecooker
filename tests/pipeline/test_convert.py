@@ -334,10 +334,9 @@ def test_compliant_mp4_without_faststart_is_remuxed(sample, request):
 
 
 def _lavfi_clip(path, source, *codec_args):
-    # Finite audio: infinite input with -shortest can hang ffmpeg. Caps clips at 2s.
     subprocess.run(
         ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", source]
-        + ["-f", "lavfi", "-i", "sine=duration=2", "-shortest", *codec_args, str(path)],
+        + ["-f", "lavfi", "-i", "sine", "-shortest", *codec_args, str(path)],
         check=True,
     )
     return str(path)
