@@ -77,7 +77,7 @@ class ChannelManager:
             for data in executor.map(self.process_node, self.all_nodes):
                 self.file_map.update(data)
         # A decomposed package (IMSCP) grows processed descendants during process_files().
-        # Only collect those: node_files() re-runs a failed file's pipeline.
+        # Collect only those; the rest are already in file_map.
         self.all_nodes = self.gather_tree_recur([], self.channel)
         for node in self.all_nodes:
             if id(node) not in processed:
