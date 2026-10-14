@@ -833,7 +833,7 @@ class SVGValidationHandler(ExtensionMatchingHandler):
     def handle_file(self, path):
         try:
             ElementTree.parse(path)
-        except ElementTree.ParseError as e:
+        except (ElementTree.ParseError, LookupError) as e:
             raise InvalidFileException(f"SVG file did not pass verification: {e}")
 
 

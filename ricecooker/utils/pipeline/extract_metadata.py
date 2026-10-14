@@ -1,9 +1,12 @@
+from subprocess import CalledProcessError
+
 from le_utils.constants import file_formats
 from le_utils.constants import format_presets
 
 from ricecooker.utils.paths import extract_path_ext
 from ricecooker.utils.pipeline.context import ContentNodeMetadata
 from ricecooker.utils.pipeline.context import FileMetadata
+from ricecooker.utils.pipeline.exceptions import InvalidFileException
 from ricecooker.utils.videos import extract_duration_of_media
 from ricecooker.utils.videos import guess_video_preset_by_resolution
 
@@ -48,9 +51,15 @@ class MetadataExtractor(ExtensionMatchingHandler):
 
 class MediaMetadataExtractorMixin:
     def infer_metadata(self, path):
-        return {
-            "duration": extract_duration_of_media(path, extract_path_ext(path)),
-        }
+        ext = extract_path_ext(path)
+        try:
+            duration = extract_duration_of_media(path, ext)
+        except CalledProcessError:
+            # ffprobe runs with -loglevel panic, so there is no stderr to report.
+            raise InvalidFileException(
+                f"Media file did not pass verification: ffprobe could not read it as {ext}"
+            )
+        return {"duration": duration}
 
 
 class AudioMetadataExtractor(MediaMetadataExtractorMixin, MetadataExtractor):

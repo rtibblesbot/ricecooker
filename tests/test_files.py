@@ -10,6 +10,7 @@ import zipfile
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 from io import BytesIO
+from pathlib import Path
 from shutil import copyfile
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -755,6 +756,9 @@ def test_invalid_htmlzip_validation(invalid_zip):
         (AudioFile, "bad.mp3", b"This is not a valid media file"),
         (ThumbnailFile, "bad.png", b"not an image"),
         (ThumbnailFile, "bad.svg", b"<svg><g></svg>"),
+        (ThumbnailFile, "bogus.svg", b'<?xml version="1.0" encoding="bogus"?><svg/>'),
+        pytest.param(VideoFile, "mp3.mp4", Path(sample_path("sample_audio.mp3")).read_bytes(), id="VideoFile-mp3.mp4"),
+        pytest.param(AudioFile, "mp4.mp3", Path(sample_path("low_res_sample.mp4")).read_bytes(), id="AudioFile-mp4.mp3"),
     ],
 )
 def test_corrupt_media_error_is_one_line_without_storage_path(
