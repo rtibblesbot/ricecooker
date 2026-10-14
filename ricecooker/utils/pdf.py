@@ -18,7 +18,7 @@ class CustomDestination(Destination):
 
 
 class CustomPDFReader(PdfFileReader):
-    def _buildDestination(self, title, array):
+    def _build_destination(self, title, array):
         page, typ = array[0:2]
         array = array[2:]
         return CustomDestination(title, page, typ, *array)

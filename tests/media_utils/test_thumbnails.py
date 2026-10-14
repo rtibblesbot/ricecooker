@@ -3,8 +3,10 @@ import zipfile
 from io import BytesIO
 
 import PIL
+import PIL.ImageDraw
 import pytest
 
+from ricecooker import config
 from ricecooker.classes.files import ExtractedHTMLZipThumbnailFile
 from ricecooker.classes.files import ExtractedKPUBThumbnailFile
 from ricecooker.utils import images
@@ -61,19 +63,34 @@ def make_fake_chromium_run(png_bytes):
     return fake_run
 
 
-def make_png_bytes(size=(1600, 900)):
+def make_png_bytes(size=(1600, 900), blank=False):
+    """PNG of one non-white colour if ``blank``, else with a second-colour rectangle."""
+    img = PIL.Image.new("RGB", size, (10, 20, 30))
+    if not blank:
+        PIL.ImageDraw.Draw(img).rectangle(
+            (0, 0, size[0] // 2, size[1] // 2), fill=(200, 100, 50)
+        )
     buf = BytesIO()
-    PIL.Image.new("RGB", size, (10, 20, 30)).save(buf, format="PNG")
+    img.save(buf, format="PNG")
     return buf.getvalue()
+
+
+def patch_chromium(monkeypatch, png_bytes):
+    """Patch the render path to a fake Chromium that writes ``png_bytes``; returns the fake run (with ``.calls``)."""
+    fake_run = make_fake_chromium_run(png_bytes)
+    monkeypatch.setattr(images, "find_chromium_binary", lambda: "/fake/chromium")
+    monkeypatch.setattr(images.subprocess, "run", fake_run)
+    return fake_run
 
 
 @pytest.fixture
 def fake_chromium(monkeypatch):
-    """Patch the render path to a fake Chromium that writes a PNG; returns the fake run (with ``.calls``)."""
-    fake_run = make_fake_chromium_run(make_png_bytes())
-    monkeypatch.setattr(images, "find_chromium_binary", lambda: "/fake/chromium")
-    monkeypatch.setattr(images.subprocess, "run", fake_run)
-    return fake_run
+    return patch_chromium(monkeypatch, make_png_bytes())
+
+
+@pytest.fixture
+def blank_chromium(monkeypatch):
+    return patch_chromium(monkeypatch, make_png_bytes(blank=True))
 
 
 # TESTS
@@ -210,6 +227,12 @@ class Test_html_zip_screenshot_thumbnail_generation(BaseThumbnailGeneratorTestCa
         assert url_arg.startswith("file://")
         assert url_arg.endswith("reader/start.html")
 
+    def test_screenshot_rejects_blank_render(self, tmpdir, blank_chromium):
+        input_file = make_no_image_zip(tmpdir.join("noimg.zip").strpath)
+        output_file = tmpdir.join("out.png").strpath
+        with pytest.raises(images.ThumbnailGenerationError):
+            images.create_image_from_zip_screenshot(input_file, output_file)
+
 
 class Test_html_zip_extractor_fun(BaseThumbnailGeneratorTestCase):
     def test_htmlzip_extractor_falls_back_when_chromium_absent(
@@ -229,6 +252,17 @@ class Test_html_zip_extractor_fun(BaseThumbnailGeneratorTestCase):
         output_file = tmpdir.join("out.png").strpath
         ExtractedHTMLZipThumbnailFile(input_file).extractor_fun(input_file, output_file)
         self.check_is_png_file(output_file)
+
+    @pytest.mark.parametrize(
+        "file_class", [ExtractedHTMLZipThumbnailFile, ExtractedKPUBThumbnailFile]
+    )
+    def test_blank_render_of_empty_body_zip_fails(
+        self, monkeypatch, blank_chromium, html_invalid_file, file_class
+    ):
+        monkeypatch.setattr(config, "FAILED_FILES", [])
+        thumbnail_file = file_class(html_invalid_file.path)
+        assert thumbnail_file.process_file() is None
+        assert config.FAILED_FILES == [thumbnail_file]
 
 
 class Test_kpub_thumbnail_generation(BaseThumbnailGeneratorTestCase):
