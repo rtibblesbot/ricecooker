@@ -3,7 +3,9 @@
 import json
 import logging
 import os
+import shutil
 import tempfile
+import time
 import uuid
 from unittest.mock import MagicMock
 from unittest.mock import mock_open
@@ -32,11 +34,13 @@ from test_videos import _clear_ricecookerfilecache
 
 from ricecooker import config
 from ricecooker.chefs import SushiChef
+from ricecooker.classes.files import _ExerciseImageFile
 from ricecooker.classes.files import DocumentFile
 from ricecooker.classes.files import File
 from ricecooker.classes.files import HTMLZipFile
 from ricecooker.classes.files import SubtitleFile
 from ricecooker.classes.files import ThumbnailFile
+from ricecooker.classes.files import TiledThumbnailFile
 from ricecooker.classes.files import VideoFile
 from ricecooker.classes.licenses import get_license
 from ricecooker.classes.licenses import License
@@ -53,6 +57,7 @@ from ricecooker.classes.nodes import TopicNode
 from ricecooker.classes.nodes import TreeNode
 from ricecooker.classes.nodes import VideoNode
 from ricecooker.classes.questions import PerseusQuestion
+from ricecooker.classes.questions import QTIQuestion
 from ricecooker.classes.questions import SingleSelectQuestion
 from ricecooker.commands import uploadchannel
 from ricecooker.exceptions import ChannelIncompleteError
@@ -60,6 +65,7 @@ from ricecooker.exceptions import FileNotFoundException
 from ricecooker.exceptions import InvalidNodeException
 from ricecooker.managers.tree import ChannelManager
 from ricecooker.managers.tree import InsufficientStorageException
+from ricecooker.utils import videos
 from ricecooker.utils.jsontrees import build_tree_from_json
 from ricecooker.utils.pipeline import FilePipeline
 from ricecooker.utils.zip import create_predictable_zip
@@ -1184,6 +1190,156 @@ def test_process_node_fails_exercise_on_extensionless_local_question_image(
     assert {f.path for f in config.FAILED_FILES} == {str(image)}
 
 
+def test_failed_file_is_processed_and_reported_once(
+    channel, tmp_path, stub_on_path, monkeypatch, caplog
+):
+    bad = tmp_path / "bad.mp4"
+    bad.write_text("not a video")
+    stub_on_path("ffprobe", "echo N/A")
+    calls = tmp_path / "ffmpeg-calls"
+    stub_on_path("ffmpeg", f"echo x >> {calls}; exec sleep 30")
+    monkeypatch.setattr(videos, "STALL_TIMEOUT", 2)
+    monkeypatch.setattr(config, "FAILED_FILES", [])
+    node = VideoNode("v", "v", licenses.CC_BY, copyright_holder="x")
+    node.add_file(VideoFile(str(bad)))
+    channel.add_child(node)
+    manager = ChannelManager(channel)
+
+    with patch("ricecooker.config.STRICT", False):
+        start = time.monotonic()
+        manager.process_tree()
+        elapsed = time.monotonic() - start
+    with caplog.at_level(logging.ERROR, logger=config.LOGGER.name):
+        manager.check_for_files_failed()
+
+    assert calls.read_text().splitlines() == ["x"]
+    assert len(config.FAILED_FILES) == 1
+    assert "1 file(s) have failed" in caplog.text
+    assert elapsed < 4
+
+
+def test_failed_qti_question_file_is_processed_and_reported(
+    channel, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(config, "FAILED_FILES", [])
+    image = _ExerciseImageFile(str(tmp_path / "missing.png"))
+    channel.add_child(
+        ExerciseNode(
+            "ex",
+            "ex",
+            license=get_license(licenses.CC_BY, copyright_holder="x"),
+            exercise_data={"m": 1, "n": 1},
+            questions=[QTIQuestion("q", "<x/>", files=[image])],
+        )
+    )
+
+    with patch("ricecooker.config.STRICT", False):
+        ChannelManager(channel).process_tree()
+
+    assert config.FAILED_FILES == [image]
+
+
+def test_file_failed_before_process_tree_is_reported_once(
+    channel, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(config, "FAILED_FILES", [])
+    thumbnail = ThumbnailFile(str(tmp_path / "missing.png"))
+    child = TopicNode("child", "child", thumbnail=thumbnail)
+    parent = TopicNode("parent", "parent", thumbnail=TiledThumbnailFile([child]))
+    parent.add_child(child)
+    channel.add_child(parent)
+
+    with patch("ricecooker.config.STRICT", False):
+        ChannelManager(channel).process_tree()
+
+    assert config.FAILED_FILES == [thumbnail]
+
+
+def test_file_failed_before_process_tree_is_retried(channel, tmp_path, thumbnail_path):
+    _clear_ricecookerfilecache()
+    late = tmp_path / "late.png"
+    thumbnail = ThumbnailFile(str(late))
+    child = TopicNode("child", "child", thumbnail=thumbnail)
+    parent = TopicNode("parent", "parent", thumbnail=TiledThumbnailFile([child]))
+    parent.add_child(child)
+    channel.add_child(parent)
+    shutil.copy(thumbnail_path, late)
+
+    with patch("ricecooker.config.STRICT", False):
+        ChannelManager(channel).process_tree()
+
+    assert thumbnail.filename is not None
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        lambda image: SingleSelectQuestion("q", f"![]({image})", "a", ["a", "b"]),
+        lambda image: PerseusQuestion(
+            "q",
+            json.dumps({"question": {"content": f"![](file://{image})"}}),
+            ka_language="en",
+        ),
+    ],
+)
+def test_failed_question_image_of_a_shared_exercise_is_processed_once(
+    channel, tmp_path, monkeypatch, question
+):
+    _clear_ricecookerfilecache()
+    monkeypatch.setattr(config, "FAILED_FILES", [])
+    bad = tmp_path / "qbad.png"
+    bad.write_text("not an image")
+    node = ExerciseNode(
+        "ex",
+        "ex",
+        license=get_license(licenses.CC_BY, copyright_holder="x"),
+        exercise_data={"m": 1, "n": 1},
+        questions=[question(bad)],
+    )
+    topics = _place_under_two_topics(channel, node)
+    manager = ChannelManager(channel)
+    manager.deduplicate_shared_nodes()
+    calls = []
+    process_file = _ExerciseImageFile.process_file
+    monkeypatch.setattr(
+        _ExerciseImageFile,
+        "process_file",
+        lambda self: calls.append(self) or process_file(self),
+    )
+
+    with patch("ricecooker.config.STRICT", False):
+        manager.process_tree()
+
+    assert len(calls) == 1
+    assert len(config.FAILED_FILES) == 1
+    assert all("qbad.png" in topic.children[0]._error for topic in topics)
+
+
+def test_shared_uri_node_runs_its_pipeline_once(channel, tmp_path):
+    bad = tmp_path / "bad.png"
+    bad.write_text("not an image")
+    pipeline = FilePipeline()
+    node = ContentNode(
+        "u",
+        "u",
+        licenses.CC_BY,
+        uri=str(bad),
+        pipeline=pipeline,
+        copyright_holder="x",
+    )
+    _place_under_two_topics(channel, node)
+    manager = ChannelManager(channel)
+    manager.deduplicate_shared_nodes()
+
+    with (
+        patch("ricecooker.config.STRICT", False),
+        patch.object(pipeline, "execute", wraps=pipeline.execute) as execute,
+    ):
+        manager.process_tree()
+
+    assert execute.call_count == 1
+
+
 def test_add_nodes_skips_invalid_nodes(channel):
     """Test that add_nodes skips invalid nodes and registers them as failed builds."""
     # Create a manager
@@ -1490,8 +1646,11 @@ def test_upload_tree_still_commits_when_only_one_node_failed(channel):
     assert config.finish_channel_url() in committed
 
 
-def test_failed_question_image_skips_only_its_exercise(channel, exercise_image_file):
+def test_failed_question_image_skips_only_its_exercise(
+    channel, exercise_image_file, monkeypatch
+):
     _clear_ricecookerfilecache()
+    monkeypatch.setattr(config, "FAILED_FILES", [])
 
     def exercise(source_id, image_url):
         return ExerciseNode(
@@ -1528,6 +1687,7 @@ def test_failed_question_image_skips_only_its_exercise(channel, exercise_image_f
     assert [child["source_id"] for _, child in posted] == ["good"]
     error = manager.failed_node_builds[bad.get_node_id().hex]["error"]
     assert "http://h/missing.png" in error
+    assert len(config.FAILED_FILES) == 1
 
 
 @pytest.mark.parametrize("threads", [1, 5])

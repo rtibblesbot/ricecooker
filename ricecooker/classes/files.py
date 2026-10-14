@@ -117,8 +117,15 @@ class File(object):
             f"object for file {self.filename} ({self.original_filename})"
         )
 
+    def record_failure(self, err):
+        self.error = str(err)
+        if self not in config.FAILED_FILES:
+            config.FAILED_FILES.append(self)
+
     def get_filename(self):
-        return self.filename or self.process_file()
+        if self.filename or self.error is not None:
+            return self.filename
+        return self.process_file()
 
     @property
     def checksum(self):
@@ -239,9 +246,8 @@ class DownloadFile(File):
                 setattr(self, key, metadata[key])
             return super().process_file()
         except (ExpectedFileException, InvalidFileException) as err:
-            self.error = str(err)
             config.LOGGER.debug("Failed to download, error is: {}".format(err))
-            config.FAILED_FILES.append(self)
+            self.record_failure(err)
             return None
 
 
@@ -466,8 +472,7 @@ class _ExerciseGraphieFile(File):
             return self.filename
         # Catch errors related to reading file path and handle silently
         except tuple(CatchAllWebResourceDownloadHandler.HANDLED_EXCEPTIONS) as err:
-            self.error = str(err)
-            config.FAILED_FILES.append(self)
+            self.record_failure(err)
 
     def generate_graphie_file(self):
         if self.ka_language is None:
@@ -547,8 +552,7 @@ class ExtractedThumbnailFile(ThumbnailFile):
         except ThumbnailGenerationError as err:
             config.LOGGER.warning("\t    Failed to extract thumbnail {}".format(err))
             self.filename = None
-            self.error = str(err)
-            config.FAILED_FILES.append(self)
+            self.record_failure(err)
         return self.filename
 
     def extractor_fun(self, fpath_in, thumbpath_out, **kwargs):
