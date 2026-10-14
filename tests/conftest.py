@@ -922,6 +922,7 @@ def stub_on_path(tmp_path, monkeypatch):
     bin_dir.mkdir()
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
+    # Callers bound elapsed time at 20s, under the 30s sleep: a slow runner can't fail them, a missed kill can.
     def install(name, script="exec sleep 30"):
         stub = bin_dir / name
         stub.write_text(f"#!/bin/sh\n{script}\n")

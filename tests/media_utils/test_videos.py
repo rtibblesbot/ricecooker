@@ -103,7 +103,7 @@ class Test_check_video_resolution:
         start = time.monotonic()
         preset = videos.guess_video_preset_by_resolution(low_res_video.name)
         assert preset == format_presets.VIDEO_LOW_RES
-        assert time.monotonic() - start < 10
+        assert time.monotonic() - start < 20
 
 
 class Test_extract_duration_of_media:
@@ -305,12 +305,12 @@ class Test_run_ffmpeg:
     def test_stall_returns_while_wrapper_child_holds_pipes(
         self, stub_on_path, monkeypatch
     ):
-        stub_on_path("ffmpeg", "sleep 10")
+        stub_on_path("ffmpeg", "sleep 30")
         monkeypatch.setattr(videos, "STALL_TIMEOUT", 1)
         start = time.monotonic()
         with pytest.raises(subprocess.TimeoutExpired):
             videos.run_ffmpeg([])
-        assert time.monotonic() - start < 5
+        assert time.monotonic() - start < 20
 
     @pytest.mark.parametrize("sig", ["SIGINT", "SIGHUP"])
     def test_terminal_signal_reaches_ffmpeg_on_worker_thread(

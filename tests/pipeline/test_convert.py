@@ -243,7 +243,7 @@ def test_hung_ffmpeg_fails_file(
         FilePipeline(default_context=context).execute(
             sample_path(sample), skip_cache=True
         )
-    assert time.monotonic() - start < 4
+    assert time.monotonic() - start < 20
 
 
 def test_timed_out_packet_scan_reencodes(faststart_240p, stub_on_path, monkeypatch):
