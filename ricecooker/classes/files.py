@@ -188,13 +188,13 @@ class DownloadFile(File):
 
     def __init__(self, path, context=None, **kwargs):
         self.path = path.strip()
+        super(DownloadFile, self).__init__(**kwargs)
         self.context = {
             "default_ext": self.default_ext,
             # A File's class fixes its format.
             "preserve_kind": True,
         }
         self.context.update(context or {})
-        super(DownloadFile, self).__init__(**kwargs)
 
     def validate(self):
         assert self.path, "{} must have a path".format(self.__class__.__name__)

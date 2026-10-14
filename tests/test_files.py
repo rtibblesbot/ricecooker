@@ -705,6 +705,27 @@ def test_extensionless_subtitle_url_processes_to_vtt(url, body):
     assert filename.endswith(".vtt")
 
 
+@pytest.mark.parametrize(
+    "file_class,sample,kwargs",
+    [
+        (VideoFile, "low_res_sample.webm", {"default_ext": "webm"}),
+        (ThumbnailFile, "thumbnail.jpg", {"default_ext": "jpg"}),
+        (VideoFile, "low_res_sample.mp4", {}),
+    ],
+    ids=["video-keyword", "thumbnail-keyword", "video-class-default"],
+)
+def test_extensionless_url_is_stored_with_default_ext(file_class, sample, kwargs):
+    ext = os.path.splitext(sample)[1]
+    url = "https://s.example/file?id=" + ext[1:]
+    with open(sample_path(sample), "rb") as f:
+        body = f.read()
+    with fake_download_session({url: body}):
+        file = file_class(url, **kwargs)
+        filename = file.process_file()
+    assert file.error is None
+    assert filename.endswith(ext)
+
+
 def test_extensionless_subtitle_response_to_download_file_fails_file():
     url = "http://fake/subs?id=1"
     with fake_download_session({url: b"WEBVTT\n"}, {url: "text/vtt"}):
