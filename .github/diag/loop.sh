@@ -2,6 +2,7 @@
 # Throwaway: loop media+convert tests; on a stuck spawned child, sample it.
 LOOPS=${LOOPS:-1}
 hangs=0
+uv run python -c "import sys, _tkinter; print(sys.version, _tkinter.TCL_VERSION)"
 for i in $(seq 1 "$LOOPS"); do
   echo "=== loop $i"
   uv run --group test --extra google_drive pytest -p no:timeout -q -p no:cacheprovider > "out-$i.log" 2>&1 &
@@ -19,9 +20,10 @@ for i in $(seq 1 "$LOOPS"); do
         echo "!!! HANG loop $i: child $c of pytest $py, etime $et, cmd $cmd"
         ps -ax -o pid,ppid,pgid,stat,etime,wchan,command | awk -v p="$py" '$1==p || $2==p || $3==p'
         ps -M -p "$c"
-        echo "--- sample child"; sample "$c" 3 2>&1 | head -120
+        echo "--- sample child"; sample "$c" 3 2>&1 | grep -v "_PyEval_EvalFrameDefault\|_PyFunction_Vectorcall\|call_function\|method_vectorcall\|slot_tp_call\|_PyObject_Call_Prepend\|Binary Images" | head -150
         echo "--- sample pytest"; sample "$py" 3 2>&1 | grep -v "^ *$" | head -200
-        echo "--- lsof child"; lsof -p "$c" 2>&1 | head -60
+        echo "--- lsof child"; lsof -p "$c" 2>&1 | grep -v " txt " | head -60
+        echo "--- lsof pytest"; lsof -p "$py" 2>&1 | grep -v " txt " | head -80
         echo "--- tail of pytest output"; tail -5 "out-$i.log"
         hangs=$((hangs+1))
         kill -9 "$c" "$py" 2>/dev/null
