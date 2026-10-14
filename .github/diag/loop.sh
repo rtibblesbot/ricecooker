@@ -9,7 +9,7 @@ for i in $(seq 1 "$LOOPS"); do
   while kill -0 $uvpid 2>/dev/null; do
     sleep 5
     py=$(pgrep -P $uvpid | head -1)
-    [ -z "$py" ] && continue
+    [ -z "$py" ] && py=$uvpid
     for c in $(pgrep -P "$py"); do
       et=$(ps -o etime= -p "$c" | tr -d ' ')
       secs=$(echo "$et" | awk -F: '{ if (NF==2) print $1*60+$2; else if (NF==3) print $1*3600+$2*60+$3; else print $1 }')
