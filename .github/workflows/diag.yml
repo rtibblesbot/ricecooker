@@ -1,0 +1,32 @@
+name: Diag macOS spawn hang
+on:
+  pull_request:
+    branches:
+      - verify-858-base
+jobs:
+  loop:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {python-version: '3.10', shard: 1}
+          - {python-version: '3.10', shard: 2}
+          - {python-version: '3.10', shard: 3}
+          - {python-version: '3.10', shard: 4}
+          - {python-version: '3.10', shard: 5}
+          - {python-version: '3.10', shard: 6}
+          - {python-version: '3.12', shard: 1}
+          - {python-version: '3.12', shard: 2}
+          - {python-version: '3.12', shard: 3}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: ${{ matrix.python-version }}
+      - run: brew install ffmpeg poppler pandoc
+      - run: uv sync --group test
+      - run: .github/diag/loop.sh
