@@ -24,6 +24,7 @@ from ricecooker.classes.nodes import DocumentNode
 from ricecooker.classes.nodes import HTML5AppNode
 from ricecooker.classes.nodes import TopicNode
 from ricecooker.classes.nodes import VideoNode
+from ricecooker.utils import images
 from ricecooker.utils import videos
 
 SHOW_THUMBS = False  # set to True to show outputs when running tests locally
@@ -233,7 +234,8 @@ class TestThumbnailGeneration(object):
         assert len(filenames) == 2, "expected two filenames"
         self.check_has_thumbnail(node)
 
-    def test_generate_thumbnail_from_html(self, html_file):
+    def test_generate_thumbnail_from_html(self, html_file, monkeypatch):
+        monkeypatch.setattr(images, "find_chromium_binary", lambda: None)
         node = HTML5AppNode(
             "html-src-id", "HTML5 App", licenses.PUBLIC_DOMAIN, thumbnail=None
         )
@@ -260,7 +262,8 @@ class TestThumbnailGeneration(object):
         assert len(filenames) == 2, "expected two filenames"
         self.check_has_thumbnail(node)
 
-    def test_generate_tiled_thumbnail(self, document, html, video, audio):
+    def test_generate_tiled_thumbnail(self, document, html, video, audio, monkeypatch):
+        monkeypatch.setattr(images, "find_chromium_binary", lambda: None)
         topic = TopicNode("test-topic", "Topic")
         topic.add_child(document)
         topic.add_child(html)
@@ -319,7 +322,8 @@ class TestThumbnailGeneration(object):
         assert len(config.FAILED_FILES) == 1, "expected one failed file"
         assert thumbnail_file.filename is None, "filename should remain None"
 
-    def test_invalid_htmlzip_fails(self, html_invalid_file):
+    def test_invalid_htmlzip_fails(self, html_invalid_file, monkeypatch):
+        monkeypatch.setattr(images, "find_chromium_binary", lambda: None)
         thumbnail_file = ExtractedHTMLZipThumbnailFile(html_invalid_file.path)
         result = thumbnail_file.process_file()
 
