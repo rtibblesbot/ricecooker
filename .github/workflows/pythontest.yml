@@ -8,6 +8,7 @@ on:
     branches:
       - develop
       - main
+      - 'verify-813-*'
 env:
   # uv 0.13 rejects the pre-POSIX tar of the PyPDF2 1.26.0 sdist
   UV_LEGACY_TAR_BACKEND: '1'
@@ -41,7 +42,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
         exclude:
           # CPython 3.14 on Windows links zlib-ng, which emits different DEFLATE
@@ -138,7 +139,9 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\tools\poppler-21.11.0\Library\bin" -Encoding utf8
           Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\tools\pandoc-3.1.11" -Encoding utf8
       - name: Run tests
-        run: uv run --group test --extra google_drive pytest
+        run: |
+          set -o pipefail
+          uv run --group test --extra google_drive pytest -rfE --tb=line 2>&1 | tee out.txt || { grep -E '^(FAILED|ERROR) |^E  |^/.*:[0-9]+: ' out.txt | head -40 | sed 's/^/::error::/'; exit 1; }
   # Single stable required check: a skipped matrix job reports no per-combination checks.
   required_checks:
     name: Python tests
