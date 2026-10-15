@@ -21,6 +21,7 @@ from le_utils.constants.labels import subjects
 
 from ricecooker.utils.pipeline.exceptions import ExpectedFileException
 from ricecooker.utils.pipeline.exceptions import InvalidFileException
+from ricecooker.utils.processing_run import run_once
 
 from .. import __version__
 from .. import config
@@ -164,6 +165,8 @@ class Node(object):
     ):
         assert isinstance(source_id, str), "source_id must be a string"
         self.source_id = source_id
+        # copy() clones share it: run_once() processes their uri once.
+        self._run_key = object()
 
         self.files = []
         self.children = []
@@ -396,7 +399,7 @@ class Node(object):
         """
         filenames = []
         for file in self.files:
-            filenames.append(file.process_file())
+            filenames.append(run_once(file, file.process_file))
             extra_fields = (file.content_node_metadata or {}).get("extra_fields")
             if extra_fields:
                 self._merge_extra_fields(extra_fields)
@@ -1203,8 +1206,11 @@ class ContentNode(TreeNode):
         if options.get("entry"):
             context = {"entry": options["entry"], "explicit_entry": True, **context}
         try:
-            file_metadata_list = self.pipeline.execute(
-                self.uri, context=context, skip_cache=config.UPDATE
+            file_metadata_list = run_once(
+                (self._run_key, repr(context)),
+                lambda: self.pipeline.execute(
+                    self.uri, context=context, skip_cache=config.UPDATE
+                ),
             )
         except (InvalidFileException, ExpectedFileException) as e:
             config.LOGGER.error(f"Error processing path: {self.uri} with error: {e}")

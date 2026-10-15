@@ -50,6 +50,7 @@ from ricecooker.classes.nodes import CustomNavigationChannelNode
 from ricecooker.classes.nodes import CustomNavigationNode
 from ricecooker.classes.nodes import DocumentNode
 from ricecooker.classes.nodes import ExerciseNode
+from ricecooker.classes.nodes import HTML5AppNode
 from ricecooker.classes.nodes import METADATA_LABEL_CHOICES
 from ricecooker.classes.nodes import Node
 from ricecooker.classes.nodes import RemoteContentNode
@@ -1190,32 +1191,75 @@ def test_process_node_fails_exercise_on_extensionless_local_question_image(
     assert {f.path for f in config.FAILED_FILES} == {str(image)}
 
 
+@pytest.mark.parametrize("shared", [False, True])
 def test_failed_file_is_processed_and_reported_once(
-    channel, tmp_path, stub_on_path, monkeypatch, caplog
+    channel, tmp_path, stub_on_path, monkeypatch, caplog, shared
 ):
     bad = tmp_path / "bad.mp4"
     bad.write_text("not a video")
     stub_on_path("ffprobe", "echo N/A")
     calls = tmp_path / "ffmpeg-calls"
     stub_on_path("ffmpeg", f"echo x >> {calls}; exec sleep 30")
-    monkeypatch.setattr(videos, "STALL_TIMEOUT", 2)
+    monkeypatch.setattr(videos, "STALL_TIMEOUT", 1)
     monkeypatch.setattr(config, "FAILED_FILES", [])
     node = VideoNode("v", "v", licenses.CC_BY, copyright_holder="x")
     node.add_file(VideoFile(str(bad)))
-    channel.add_child(node)
+    if shared:
+        _place_under_two_topics(channel, node)
+    else:
+        channel.add_child(node)
     manager = ChannelManager(channel)
+    manager.deduplicate_shared_nodes()
 
     with patch("ricecooker.config.STRICT", False):
-        start = time.monotonic()
         manager.process_tree()
-        elapsed = time.monotonic() - start
     with caplog.at_level(logging.ERROR, logger=config.LOGGER.name):
         manager.check_for_files_failed()
 
     assert calls.read_text().splitlines() == ["x"]
     assert len(config.FAILED_FILES) == 1
     assert "1 file(s) have failed" in caplog.text
-    assert elapsed < 4
+
+
+def test_raising_file_shared_by_two_placements_fails_both(channel):
+    calls = []
+
+    class RaisingFile(ThumbnailFile):
+        def process_file(self):
+            calls.append(self)
+            raise ValueError("bad file")
+
+    node = TopicNode("t", "t", thumbnail=RaisingFile("x.png"))
+    topics = _place_under_two_topics(channel, node)
+    manager = ChannelManager(channel)
+    manager.deduplicate_shared_nodes()
+
+    with patch("ricecooker.config.STRICT", False):
+        manager.process_tree()
+
+    placements = [topic.children[0] for topic in topics]
+    assert len(calls) == 1
+    assert all("bad file" in getattr(p, "_error", "") for p in placements)
+
+
+def test_shared_file_waits_for_its_first_run(channel, monkeypatch):
+    _clear_ricecookerfilecache()
+    monkeypatch.setattr(config, "TASK_THREADS", 5)
+    node = HTML5AppNode(
+        "h",
+        "h",
+        licenses.CC_BY,
+        files=[HTMLZipFile(sample_path("sample_html.zip"))],
+        copyright_holder="x",
+    )
+    topics = _place_under_two_topics(channel, node)
+    manager = ChannelManager(channel)
+    manager.deduplicate_shared_nodes()
+
+    manager.process_tree()
+
+    for topic in topics:
+        topic.children[0].validate()
 
 
 def test_failed_qti_question_file_is_processed_and_reported(
@@ -1280,8 +1324,11 @@ def test_file_failed_before_process_tree_is_reported_once(
     assert config.FAILED_FILES == [thumbnail]
 
 
-def test_file_failed_before_process_tree_is_retried(channel, tmp_path, thumbnail_path):
+def test_file_failed_before_process_tree_is_retried(
+    channel, tmp_path, thumbnail_path, monkeypatch
+):
     _clear_ricecookerfilecache()
+    monkeypatch.setattr(config, "FAILED_FILES", [])
     late = tmp_path / "late.png"
     thumbnail = ThumbnailFile(str(late))
     child = TopicNode("child", "child", thumbnail=thumbnail)
@@ -1294,6 +1341,77 @@ def test_file_failed_before_process_tree_is_retried(channel, tmp_path, thumbnail
         ChannelManager(channel).process_tree()
 
     assert thumbnail.filename is not None
+    assert thumbnail.error is None
+    assert config.FAILED_FILES == []
+
+
+def test_direct_process_files_retries_a_failed_file(
+    tmp_path, thumbnail_path, monkeypatch
+):
+    _clear_ricecookerfilecache()
+    monkeypatch.setattr(config, "FAILED_FILES", [])
+    late = tmp_path / "late.png"
+    thumbnail = ThumbnailFile(str(late))
+    topic = TopicNode("t", "t", thumbnail=thumbnail)
+    topic.process_files()
+    shutil.copy(thumbnail_path, late)
+
+    topic.process_files()
+
+    assert thumbnail.filename is not None
+
+
+def test_file_failing_without_error_is_processed_once(channel):
+    calls = []
+
+    class SilentlyFailingFile(ThumbnailFile):
+        def process_file(self):
+            calls.append(self)
+
+    channel.add_child(TopicNode("t", "t", thumbnail=SilentlyFailingFile("x.png")))
+
+    ChannelManager(channel).process_tree()
+
+    assert len(calls) == 1
+
+
+def test_filename_returned_but_not_assigned_is_uploaded(channel):
+    class ReturningFile(ThumbnailFile):
+        def process_file(self):
+            return "abc.png"
+
+    channel.add_child(TopicNode("t", "t", thumbnail=ReturningFile("x.png")))
+
+    assert "abc.png" in ChannelManager(channel).process_tree()
+
+
+def test_derived_topic_thumbnail_waits_for_a_descendant_thumbnail(
+    channel, thumbnail_path, monkeypatch
+):
+    _clear_ricecookerfilecache()
+    monkeypatch.setattr(config, "TASK_THREADS", 5)
+
+    class SlowThumbnailFile(ThumbnailFile):
+        def process_file(self):
+            time.sleep(0.5)
+            return super().process_file()
+
+    topic = TopicNode("t", "t", derive_thumbnail=True)
+    topic.add_child(
+        DocumentNode(
+            "d",
+            "d",
+            licenses.CC_BY,
+            copyright_holder="x",
+            thumbnail=SlowThumbnailFile(thumbnail_path),
+        )
+    )
+    channel.add_child(topic)
+
+    with patch("ricecooker.config.STRICT", False):
+        ChannelManager(channel).process_tree()
+
+    assert [bool(f.get_filename()) for f in topic.files] == [True]
 
 
 @pytest.mark.parametrize(

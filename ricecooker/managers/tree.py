@@ -8,6 +8,7 @@ from requests.exceptions import RequestException
 from ricecooker.classes.files import split_known_extension
 from ricecooker.exceptions import ChannelIncompleteError
 from ricecooker.exceptions import InvalidNodeException
+from ricecooker.utils.processing_run import processing_run
 
 from .. import config
 
@@ -70,17 +71,15 @@ class ChannelManager:
         """
         if not self.all_nodes:
             self.all_nodes = self.gather_tree_recur([], self.channel)
-        processed = set(map(id, self.all_nodes))
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=config.TASK_THREADS
-        ) as executor:
-            for data in executor.map(self.process_node, self.all_nodes):
-                self.file_map.update(data)
-        # A decomposed package (IMSCP) grows processed descendants during process_files().
-        # Collect only those; the rest are already in file_map.
-        self.all_nodes = self.gather_tree_recur([], self.channel)
-        for node in self.all_nodes:
-            if id(node) not in processed:
+        with processing_run():
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=config.TASK_THREADS
+            ) as executor:
+                for data in executor.map(self.process_node, self.all_nodes):
+                    self.file_map.update(data)
+            # A decomposed package (IMSCP) grows processed descendants during process_files().
+            self.all_nodes = self.gather_tree_recur([], self.channel)
+            for node in self.all_nodes:
                 self.file_map.update(self.node_files(node))
         return list(self.file_map.keys())
 
