@@ -354,3 +354,5 @@ class TestThumbnailGeneration(object):
         assert thumbnail_file.process_file() is None
         assert config.FAILED_FILES == [thumbnail_file]
         assert "timed out" in thumbnail_file.error
+
+# verify
