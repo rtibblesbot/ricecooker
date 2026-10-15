@@ -67,6 +67,16 @@ def test_split_chapters(doc1_with_toc_path, downloads_dir):
             _check_path_matches_title_len(chapter)
 
 
+def test_split_chapters_have_no_acroform(doc1_with_toc_path, downloads_dir):
+    with PDFParser(doc1_with_toc_path, directory=downloads_dir) as pdfparser:
+        chapters = pdfparser.split_chapters()
+    for chapter in chapters:
+        with open(chapter["path"], "rb") as f:
+            reader = PdfFileReader(f)
+            assert "/AcroForm" not in reader.trailer["/Root"]
+            assert "/NeedAppearances" not in reader.trailer["/Info"]
+
+
 def test_split_chapters_alt(doc1_with_toc_path, downloads_dir):
     with PDFParser(doc1_with_toc_path, directory=downloads_dir) as pdfparser:
         chapters_toc = pdfparser.get_toc()
