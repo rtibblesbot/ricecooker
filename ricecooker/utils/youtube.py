@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 from datetime import datetime
 from enum import Enum
@@ -14,6 +15,7 @@ from le_utils.constants import languages
 
 from . import paths
 from . import proxy
+from . import videos
 
 LOGGER = logging.getLogger("YouTubeResource")
 LOGGER.setLevel(logging.DEBUG)
@@ -26,6 +28,37 @@ class VideoURLFormatError(Exception):
                 url, expected_format
             )
         )
+
+
+class _StallWatchedPopen(yt_dlp.utils.Popen):
+    @classmethod
+    def run(cls, args, **kwargs):
+        # ffprobe rejects -progress.
+        if "ffprobe" in os.path.basename(args[0]):
+            return super().run(args, timeout=videos.PROBE_TIMEOUT, **kwargs)
+        result = videos.run_ffmpeg(args[1:], executable=args[0], popen=cls)
+        return result.stdout, result.stderr, result.returncode
+
+
+# yt_dlp.utils._get_exe_version_output, plus a timeout.
+def _get_exe_version_output(exe, args, ignore_return_code=False):
+    try:
+        stdout, _, ret = yt_dlp.utils.Popen.run(
+            [exe, *args],
+            text=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=videos.PROBE_TIMEOUT,
+        )
+    except OSError:
+        return False
+    return None if ret and not ignore_return_code else stdout
+
+
+# yt-dlp's ffmpeg postprocessors and version probes run with no timeout.
+yt_dlp.postprocessor.ffmpeg.Popen = _StallWatchedPopen
+yt_dlp.postprocessor.ffmpeg._get_exe_version_output = _get_exe_version_output
 
 
 NON_NETWORK_ERRORS = [
@@ -143,6 +176,9 @@ class YouTubeResource(object):
                 edited_results = self._format_for_ricecooker(self.info)
                 return edited_results
 
+            except subprocess.TimeoutExpired:
+                # A stalled local ffmpeg probe, not a network error.
+                raise
             except Exception as e:
                 network_related_error = True
                 if isinstance(e, yt_dlp.utils.DownloadError):
@@ -174,7 +210,8 @@ class YouTubeResource(object):
         """
         Download the YouTube resource(s) specified in `self.info`. If `self.info`
         is None, it will be populated by calling `self.get_resource_info` which
-        in turn uses `self.url`. Returns None if download fails.
+        in turn uses `self.url`. Returns None if download fails; raises
+        `subprocess.TimeoutExpired` if an ffmpeg or ffprobe run stalls.
         """
         if base_path:
             download_dir = os.path.join(base_path, self.get_dir_name_from_url())
@@ -212,6 +249,9 @@ class YouTubeResource(object):
                     self.info = ydl.process_ie_result(self.info, download=True)
                 LOGGER.debug("Finished process_ie_result successfully")
                 break
+            except subprocess.TimeoutExpired:
+                # A stalled local ffmpeg run, not a network error.
+                raise
             except Exception as e:
                 network_related_error = True
                 if isinstance(e, yt_dlp.utils.DownloadError):
