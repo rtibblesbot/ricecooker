@@ -923,9 +923,12 @@ def stub_on_path(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
     def install(name, script="exec sleep 30"):
+        """Returns a file that gains one line per stub invocation."""
         stub = bin_dir / name
-        stub.write_text(f"#!/bin/sh\n{script}\n")
+        calls = bin_dir / f"{name}.calls"
+        stub.write_text(f'#!/bin/sh\necho >> "{calls}"\n{script}\n')
         stub.chmod(0o755)
+        return calls
 
     return install
 
