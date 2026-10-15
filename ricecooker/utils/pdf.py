@@ -18,10 +18,16 @@ class CustomDestination(Destination):
 
 
 class CustomPDFReader(PdfFileReader):
-    def _buildDestination(self, title, array):
+    def _build_destination(self, title, array):
         page, typ = array[0:2]
         array = array[2:]
         return CustomDestination(title, page, typ, *array)
+
+
+class CustomPDFWriter(PdfFileWriter):
+    def set_need_appearances_writer(self):
+        # PyPDF2 1.28 points /AcroForm at the Info dict; add no form at all
+        pass
 
 
 class PDFParser(object):
@@ -153,7 +159,7 @@ class PDFParser(object):
         Save the subset of pages specified in `pagerange` (dict) as separate PDF.
         e.g. pagerange = {'title':'First chapter', 'page_start':0, 'page_end':5}
         """
-        writer = PdfFileWriter()
+        writer = CustomPDFWriter()
         slug = "".join(
             [c for c in pagerange["title"].replace(" ", "-") if c.isalnum() or c == "-"]
         )
@@ -162,7 +168,7 @@ class PDFParser(object):
         )
         for page in range(pagerange["page_start"], pagerange["page_end"]):
             writer.addPage(self.pdf.getPage(page))
-            writer.removeLinks()  # must be done every page
+            writer.remove_links()  # must be done every page
         with open(write_to_path, "wb") as outfile:
             writer.write(outfile)
         return write_to_path
