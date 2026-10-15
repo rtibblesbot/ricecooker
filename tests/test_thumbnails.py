@@ -356,3 +356,4 @@ class TestThumbnailGeneration(object):
         assert "timed out" in thumbnail_file.error
 
 # verify
+# verify2
