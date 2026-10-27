@@ -61,8 +61,9 @@ Running a chef
 --------------
 Run from the chef dir; the cwd is what syncs, and a chef script outside it is refused.
 
-    python chef.py --remote[=NAME] [--env KEY=VALUE] [--env-pass KEY] [chef args]
+    python chef.py --remote[=NAME] [--detach] [--env KEY=VALUE] [--env-pass KEY] [chef args]
 
+  - `--detach` starts the run and exits 0 without attaching, with or without a terminal.
   - `--env KEY=VALUE` sets KEY; `--env-pass KEY` forwards KEY from your environment.
     Both override the box's `remote-env`.
   - `--token`, or else the laptop's `STUDIO_TOKEN`, is forwarded; with neither, the
@@ -72,7 +73,8 @@ Run from the chef dir; the cwd is what syncs, and a chef script outside it is re
     ricecooker. It is rebuilt only when that manifest changes.
   - A start that would rebuild `.default-venv` or re-sync `.ricecooker-src` is refused
     while another chef under `remote_root` runs.
-  - Each script has one run at a time: re-running while it is live attaches instead.
+  - Each script has one run at a time: re-running while it is live attaches instead,
+    or with `--detach` exits 0 and leaves the run untouched.
   - Detach with `Ctrl-b d`; `Ctrl-C` interrupts the chef.
   - A laptop `TERM` the box has no terminfo for (e.g. Ghostty's `xterm-ghostty`) attaches as `xterm-256color`.
   - The client prints the log paths and exits with the chef's exit code, or 0 on detach.
