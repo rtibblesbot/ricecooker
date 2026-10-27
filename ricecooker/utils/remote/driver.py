@@ -121,7 +121,7 @@ def env_pair(value: str) -> tuple:
 def client_flag(name: str):
     """The client-only flag `name` spells, or None. argparse accepts unambiguous
     abbreviations (`--tok`), so those must be recognized too."""
-    flags = ("--remote", *VALUE_FLAGS)
+    flags = ("--remote", "--detach", *VALUE_FLAGS)
     if name in flags:
         return name
     matches = [f for f in flags if len(name) > 2 and f.startswith(name)]
@@ -400,7 +400,13 @@ def finish(session, code) -> int:
 
 
 def run_remotely(
-    argv, env, remote=None, chef_dir=None, runner=subprocess_runner, global_path=None
+    argv,
+    env,
+    remote=None,
+    chef_dir=None,
+    runner=subprocess_runner,
+    global_path=None,
+    detach=False,
 ) -> int:
     chef_dir = Path.cwd() if chef_dir is None else Path(chef_dir)
     try:
@@ -413,7 +419,7 @@ def run_remotely(
         if status.state == LIVE:
             _say(
                 f"{profile.name} is already running "
-                f"(since {status.started:%Y-%m-%d %H:%M}); attaching"
+                f"(since {status.started:%Y-%m-%d %H:%M})"
             )
         else:
             if status.state == FINISHED:
@@ -425,6 +431,9 @@ def run_remotely(
                 session.kill()
             # Only here: a live chef must not be synced under.
             _start(session, argv, env)
+        if detach:
+            _say(_reattach_hint(session))
+            return 0
         return finish(session, session.attach())
     except RemoteError as e:
         print(e, file=sys.stderr)

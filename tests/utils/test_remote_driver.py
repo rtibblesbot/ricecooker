@@ -31,7 +31,6 @@ from ricecooker.utils.remote.session import LIVE
 from ricecooker.utils.remote.session import NOT_A_TTY
 from ricecooker.utils.remote.session import Session
 from ricecooker.utils.remote.transport import RunResult
-from ricecooker.utils.remote.transport import subprocess_runner
 from ricecooker.utils.remote.transport import Transport
 
 needs_sh = pytest.mark.skipif(os.name == "nt", reason="ssh shim needs sh")
@@ -164,10 +163,10 @@ def box_tools(box, monkeypatch, present):
     monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{tools}")
 
 
-def run_remotely_from(laptop, root, script=None, runner=subprocess_runner):
+def run_remotely_from(laptop, root, script=None, args=(), **kwargs):
     config = write_global_config(laptop.parent / "remote.toml", root)
-    argv = [str(script or laptop / "chef.py")]
-    return run_remotely(argv, {}, chef_dir=laptop, runner=runner, global_path=config)
+    argv = [str(script or laptop / "chef.py"), *args]
+    return run_remotely(argv, {}, chef_dir=laptop, global_path=config, **kwargs)
 
 
 def test_unreachable_box_fails_with_ssh_stderr(laptop, capsys):
@@ -505,6 +504,24 @@ def test_live_session_is_attached_without_restart_or_sync(
     assert first.wait() == 0
     assert second.wait() == 0
     assert "already running" in second.output
+    assert len(seen(chef_dir)) == 1
+    assert "# edited" not in (chef_dir / "chef.py").read_text()
+
+
+@lifecycle
+def test_detach_starts_then_finds_live_run_without_attaching(
+    box, chef_dir, laptop, capsys, monkeypatch, wait_until
+):
+    monkeypatch.setattr(sys, "stdin", io.StringIO())
+    write_chef(laptop, "pyproject.toml", PYPROJECT)
+    start = partial(run_remotely_from, laptop, box, args=("0", "wait"), detach=True)
+    assert start() == 0
+    with open(laptop / "chef.py", "a") as f:
+        f.write("# edited\n")
+    capsys.readouterr()
+    assert start() == 0
+    assert "already running" in capsys.readouterr().err
+    assert wait_until(lambda: seen(chef_dir), timeout=30)
     assert len(seen(chef_dir)) == 1
     assert "# edited" not in (chef_dir / "chef.py").read_text()
 
