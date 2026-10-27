@@ -88,6 +88,8 @@ Run as `python chef.py remote <command>`; `remote` must be the first argument.
 Every command takes `--remote NAME`.
 
   - `attach`: attach to the script's session.
+  - `status`: print the script's run state, Studio link and log paths. Exits `0` finished ok,
+    `3` running, `4` finished failed (or without an exit code), `5` no run.
   - `sync`: sync the chef dir to the script's box dir; refused while a run is live.
   - `pull <remote-path> [dest]`: copy a path relative to the script's box dir to `dest` (default `.`).
   - `shell`: open a login shell in the script's box dir.

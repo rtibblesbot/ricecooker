@@ -9,6 +9,7 @@ import re
 import sys
 from pathlib import Path
 from shlex import quote
+from typing import Optional
 
 import ricecooker
 from ricecooker import __version__
@@ -320,7 +321,7 @@ def _reattach_hint(session) -> str:
     profile = session.transport.profile
     return (
         f"{profile.name} keeps running on {profile.ssh}. "
-        "Re-run with the same --remote to reattach."
+        "Re-run with the same --remote to reattach, or check it with `remote status`."
     )
 
 
@@ -370,6 +371,25 @@ def _start(session, argv, env) -> None:
     session.create(chef_command(session, venv, argv, env), encoded, launcher)
 
 
+def chef_log(session) -> Optional[str]:
+    """The newest chef log of this run; None before the chef starts writing one."""
+    started = posixpath.join(session.bookkeeping_dir, "chef-started")
+    latest = session.transport.ssh(
+        ["sh", "-c", LATEST_LOG, "sh", session.chef_dir, started]
+    )
+    name = latest.stdout.strip()
+    return posixpath.join(session.chef_dir, name) if name else None
+
+
+def log_lines(session, log) -> list:
+    chef = [f"chef log: {log}"] if log else []
+    return [*chef, f"session log: {session.log_path}"]
+
+
+def ended(exit_code) -> str:
+    return "ended without an exit code" if exit_code is None else f"exited {exit_code}"
+
+
 def finish(session, code) -> int:
     if code == NOT_A_TTY:
         _say(_reattach_hint(session))
@@ -378,12 +398,8 @@ def finish(session, code) -> int:
         raise RemoteDriverError(f"remote: attach exited {code}")
     exit_code = session.exit_code()
     transport = session.transport
-    started = posixpath.join(session.bookkeeping_dir, "chef-started")
-    latest = transport.ssh(["sh", "-c", LATEST_LOG, "sh", session.chef_dir, started])
-    chef_log = latest.stdout.strip()
-    if chef_log:
-        _say(f"chef log: {posixpath.join(session.chef_dir, chef_log)}")
-    _say(f"session log: {session.log_path}")
+    for line in log_lines(session, chef_log(session)):
+        _say(line)
     if exit_code is None:
         _say(f"detached; {_reattach_hint(session)}")
         return 0
@@ -423,11 +439,7 @@ def run_remotely(
             )
         else:
             if status.state == FINISHED:
-                code = status.exit_code
-                ended = (
-                    "ended without an exit code" if code is None else f"exited {code}"
-                )
-                _say(f"previous run of {profile.name} {ended}")
+                _say(f"previous run of {profile.name} {ended(status.exit_code)}")
                 session.kill()
             # Only here: a live chef must not be synced under.
             _start(session, argv, env)

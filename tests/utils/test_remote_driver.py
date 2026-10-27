@@ -68,20 +68,14 @@ PYPROJECT = (
 )
 
 
+def checkout_pythonpath() -> str:
+    """For a box venv with no dependencies under offline uv: this checkout stands in."""
+    return os.pathsep.join([str(Path(ricecooker.__file__).parents[1]), *sys.path])
+
+
 def write_global_config(path, box, ssh="box"):
     path.write_text(f'default = "box"\n\n[box]\nssh = "{ssh}"\nremote_root = "{box}"\n')
     return path
-
-
-@pytest.fixture
-def offline_uv(monkeypatch, tmp_path):
-    monkeypatch.setenv("UV_OFFLINE", "1")
-    monkeypatch.setenv("UV_PYTHON", sys.executable)
-    monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    return home
 
 
 def make_profile(box, name="my-chef", **kwargs):
@@ -461,9 +455,7 @@ def test_chef_reuses_another_chefs_download_offline(laptop, remote, tmp_path):
     )
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{server.server_port}/doc.pdf"
-    # The box venv has no dependencies and uv is offline; this checkout stands in.
-    path = [str(Path(ricecooker.__file__).parents[1]), *sys.path]
-    env = {"PYTHONPATH": os.pathsep.join(path)}
+    env = {"PYTHONPATH": checkout_pythonpath()}
     chefs = [laptop.parent / name for name in ("dl1", "dl2")]
     for chef in chefs:
         chef.mkdir()
