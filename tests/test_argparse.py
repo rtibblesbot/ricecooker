@@ -1,4 +1,5 @@
 import sys
+from types import SimpleNamespace
 
 import pytest
 from mock import patch
@@ -141,8 +142,8 @@ def no_token_prompt(monkeypatch):
 def handed_off(monkeypatch, studio_token):
     calls = []
 
-    def record(argv, env, remote=None):
-        calls.append((argv, env, remote))
+    def record(argv, env, remote=None, detach=False):
+        calls.append(SimpleNamespace(argv=argv, env=env, remote=remote, detach=detach))
         return 7
 
     def run(self, args, options):
@@ -181,9 +182,10 @@ def test_bad_env_values_are_rejected(studio_token, flag):
         chef_arg_parser(f"./chef.py --remote {flag}")
 
 
-def test_env_flags_without_remote_are_usage_errors(studio_token):
-    with pytest.raises(InvalidUsageException):
-        chef_arg_parser("./chef.py --token=t --env A=1")
+@pytest.mark.parametrize("flag", ["--env A=1", "--detach"])
+def test_client_flags_without_remote_are_usage_errors(studio_token, flag):
+    with pytest.raises(InvalidUsageException, match="require --remote"):
+        chef_arg_parser(f"./chef.py --token=t {flag}")
 
 
 @pytest.mark.parametrize(
@@ -242,28 +244,36 @@ def test_remote_hand_off_strips_client_flags_and_carries_env(handed_off, monkeyp
     run_main(
         "./chef.py --remote=box --token abc --env A=1 --env-pass=B -u dryrun lang=fr"
     )
-    [(argv, env, remote)] = handed_off
-    assert argv == ["./chef.py", "-u", "dryrun", "lang=fr"]
-    assert env == {"STUDIO_TOKEN": "abc", "A": "1", "B": "from-laptop"}
-    assert remote == "box"
+    [call] = handed_off
+    assert call.argv == ["./chef.py", "-u", "dryrun", "lang=fr"]
+    assert call.env == {"STUDIO_TOKEN": "abc", "A": "1", "B": "from-laptop"}
+    assert call.remote == "box"
 
 
 def test_remote_hand_off_strips_abbreviated_client_flags(handed_off, monkeypatch):
     monkeypatch.setenv("B", "from-laptop")
     run_main("./chef.py --tok abc --env-p=B --remo dryrun")
-    [(argv, env, remote)] = handed_off
-    assert argv == ["./chef.py", "dryrun"]
-    assert env == {"STUDIO_TOKEN": "abc", "B": "from-laptop"}
-    assert remote is None
+    [call] = handed_off
+    assert call.argv == ["./chef.py", "dryrun"]
+    assert call.env == {"STUDIO_TOKEN": "abc", "B": "from-laptop"}
+    assert call.remote is None
+
+
+@pytest.mark.parametrize("flag", ["--detach", "--det"])
+def test_remote_detach_is_handed_off_and_stripped(handed_off, flag):
+    run_main(f"./chef.py --remote {flag} dryrun")
+    [call] = handed_off
+    assert call.argv == ["./chef.py", "dryrun"]
+    assert call.detach is True
 
 
 def test_remote_token_file_forwards_contents(handed_off, tmp_path):
     token_file = tmp_path / "token.txt"
     token_file.write_text("file-tok\n")
     run_main(f"./chef.py --remote --token={token_file}")
-    [(argv, env, _)] = handed_off
-    assert env["STUDIO_TOKEN"] == "file-tok"
-    assert not any(str(token_file) in a for a in argv)
+    [call] = handed_off
+    assert call.env["STUDIO_TOKEN"] == "file-tok"
+    assert not any(str(token_file) in a for a in call.argv)
 
 
 def test_remote_never_prompts_for_token(handed_off, monkeypatch):
@@ -275,8 +285,8 @@ def test_remote_never_prompts_for_token(handed_off, monkeypatch):
 
     monkeypatch.setattr("builtins.input", no_prompt)
     run_main("./chef.py --remote")
-    [(_, env, _)] = handed_off
-    assert "STUDIO_TOKEN" not in env
+    [call] = handed_off
+    assert "STUDIO_TOKEN" not in call.env
 
 
 def test_env_pass_of_unset_variable_is_usage_error(handed_off, monkeypatch):
