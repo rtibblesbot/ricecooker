@@ -386,6 +386,10 @@ def log_lines(session, log) -> list:
     return [*chef, f"session log: {session.log_path}"]
 
 
+def since(started) -> str:
+    return f"since {started:%Y-%m-%d %H:%M}"
+
+
 def ended(exit_code) -> str:
     return "ended without an exit code" if exit_code is None else f"exited {exit_code}"
 
@@ -433,10 +437,7 @@ def run_remotely(
         session = Session(transport)
         status = session.status()
         if status.state == LIVE:
-            _say(
-                f"{profile.name} is already running "
-                f"(since {status.started:%Y-%m-%d %H:%M})"
-            )
+            _say(f"{profile.name} is already running ({since(status.started)})")
         else:
             if status.state == FINISHED:
                 _say(f"previous run of {profile.name} {ended(status.exit_code)}")

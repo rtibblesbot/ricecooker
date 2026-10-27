@@ -21,6 +21,7 @@ from ricecooker.utils.remote.driver import LOOSE_BOX_ENV
 from ricecooker.utils.remote.driver import MISSING_TOOLS
 from ricecooker.utils.remote.driver import preflight
 from ricecooker.utils.remote.driver import REQUIRED_TOOLS
+from ricecooker.utils.remote.driver import since
 from ricecooker.utils.remote.driver import storage_dir
 from ricecooker.utils.remote.driver import uses_default_venv
 from ricecooker.utils.remote.session import LIVE
@@ -152,17 +153,17 @@ def status(transport, args) -> int:
         print(f"{profile.name}: no run on {profile.ssh}")
         return STATUS_NO_RUN
     if run.state == LIVE:
-        print(f"{profile.name}: running since {run.started:%Y-%m-%d %H:%M}")
+        print(f"{profile.name}: running {since(run.started)}")
         code = STATUS_RUNNING
     else:
         print(f"{profile.name}: {ended(run.exit_code)}")
         code = 0 if run.exit_code == 0 else STATUS_FAILED
     log = chef_log(session)
     if log:
-        # 1: no link logged.
         grep = ["grep", "-o", "-e", f"{CHANNEL_CREATED} .*", log]
-        for link in _ssh(transport, *grep, ok=(0, 1)).stdout.splitlines()[-1:]:
-            print(link)
+        links = _ssh(transport, *grep, ok=(0, 1)).stdout.splitlines()
+        if links:
+            print(links[-1])
     for line in log_lines(session, log):
         print(line)
     return code

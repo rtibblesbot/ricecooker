@@ -69,7 +69,6 @@ PYPROJECT = (
 
 
 def checkout_pythonpath() -> str:
-    """For a box venv with no dependencies under offline uv: this checkout stands in."""
     return os.pathsep.join([str(Path(ricecooker.__file__).parents[1]), *sys.path])
 
 

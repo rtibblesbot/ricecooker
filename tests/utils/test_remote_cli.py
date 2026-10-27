@@ -1,5 +1,3 @@
-import os
-import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -16,8 +14,8 @@ from test_remote_driver import needs_sh
 from test_remote_driver import needs_uv
 from test_remote_driver import PYPROJECT
 from test_remote_driver import write_global_config
+from test_remote_session import kill_pane
 from test_remote_session import make_session
-from test_remote_session import tmux
 from test_remote_transport import write
 
 from ricecooker.commands import CHANNEL_CREATED
@@ -277,8 +275,7 @@ def test_status_of_failed_run_is_failed(
     session.create(["sh", "-c", command])
     if killed:
         assert wait_until((box / "laptop-chef" / "started").exists)
-        pane = tmux("display-message", "-p", "-t", session.target, "#{pane_pid}")
-        os.killpg(int(pane.stdout), signal.SIGKILL)
+        kill_pane(session)
     assert wait_until(lambda: session.status().state == FINISHED)
     assert run_cli(laptop, box, "status") == 4
     assert ended in capsys.readouterr().out
