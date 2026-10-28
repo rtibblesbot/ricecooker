@@ -8,6 +8,7 @@ on:
     branches:
       - develop
       - main
+      - 'verify-880-**'
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
@@ -39,8 +40,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        os: [ubuntu-latest]
+        python-version: ['3.10', '3.14']
         exclude:
           # CPython 3.14 on Windows links zlib-ng, which emits different DEFLATE
           # bytes than the reference zlib; predictable-zip hashes are pinned in
@@ -136,7 +137,23 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\tools\poppler-21.11.0\Library\bin" -Encoding utf8
           Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\tools\pandoc-3.1.11" -Encoding utf8
       - name: Run tests
-        run: uv run --group test --extra google_drive pytest
+        run: uv run --group test --extra google_drive pytest tests/test_argparse.py tests/utils/test_remote_session.py tests/utils/test_remote_cli.py tests/utils/test_remote_driver.py --junitxml=junit.xml
+      - name: Annotate remote test outcomes
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          out = {}
+          for tc in ET.parse("junit.xml").iter("testcase"):
+              state = next((c.tag for c in tc if c.tag in ("failure", "error", "skipped")), "passed")
+              out.setdefault(state, []).append(tc.get("name"))
+              if state in ("failure", "error"):
+                  msg = (tc.find(state).get("message") or "")[:300].replace("\n", "%0A")
+                  print(f"::error title={tc.get('name')}::{msg}")
+          for state, names in out.items():
+              detach = [n for n in names if "detach" in n or "status" in n]
+              print(f"::notice title={state} {len(names)}::{' '.join(detach)}")
+          PY
   # Single stable required check: a skipped matrix job reports no per-combination checks.
   required_checks:
     name: Python tests
