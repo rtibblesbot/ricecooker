@@ -70,14 +70,14 @@ SCOPE = ("systemd-run", "--user", "--scope")
 LOG_SIZES_FILE = "log-sizes"
 LOG_SIZES = f'wc -c logs/*.log > "$d/{LOG_SIZES_FILE}" 2>/dev/null'
 
-# sh -c script; args: <bookkeeping dir> <venv> <digest> <build> <names> <chef argv...>.
+# sh -c script; args: <bookkeeping dir> <venv> <digest> <build> <names> <detach> <chef argv...>.
 # Box-owned env first, then the session env (client --env/--env-pass/token) over it.
 # Session env values are base64: $(tmux show-environment) would strip trailing newlines.
 # The trailing x keeps a value's trailing newlines from $(...).
 # venv.log survives only this run's failed build; the driver prints its tail.
 # The { ...; echo $? > venv.rc; } | tee form: POSIX sh has no pipefail.
 RUN_CHEF = (
-    'd=$1 venv=$2 digest=$3 build=$4 names=$5; shift 5; mkdir -p "$d"; '
+    'd=$1 venv=$2 digest=$3 build=$4 names=$5 detach=$6; shift 6; mkdir -p "$d"; '
     'rm -f "$d/venv.log" "$d/chef-started"; '
     f'f="{BOX_ENV}"; set -a; [ -f "$f" ] && . "$f"; set +a; '
     'for k in $names; do v=$(tmux show-environment "$k") && '
@@ -86,7 +86,8 @@ RUN_CHEF = (
     '{ sh -c "$build" 2>&1; echo $? > "$d/venv.rc"; } | tee "$d/venv.log"; '
     'read rc < "$d/venv.rc"; [ "$rc" = 0 ] || exit "$rc"; '
     'echo "$digest" > "$venv/.ricecooker-digest"; rm -f "$d/venv.log" "$d/venv.rc"; fi; '
-    f'{LOG_SIZES}; touch "$d/chef-started"; exec "$venv/bin/python" "$@"'
+    f'{LOG_SIZES}; touch "$d/chef-started"; [ -z "$detach" ] || exec < /dev/null; '
+    'exec "$venv/bin/python" "$@"'
 )
 
 # sh -c script; $1: remote chef dir, $2: chef-started. Prints the newest log
@@ -284,7 +285,7 @@ def plan_venv(profile, chef_dir, source_dir=None) -> Venv:
     return Venv(path, digest.hexdigest(), build)
 
 
-def chef_command(session, venv, argv, env_names=()) -> list:
+def chef_command(session, venv, argv, env_names=(), detach=False) -> list:
     return [
         "sh",
         "-c",
@@ -295,6 +296,7 @@ def chef_command(session, venv, argv, env_names=()) -> list:
         venv.digest,
         venv.build,
         " ".join(env_names),
+        "1" if detach else "",
         *argv,
     ]
 
@@ -353,7 +355,7 @@ def _refuse_shared_rewrite(transport, venv, source) -> None:
     )
 
 
-def _start(session, argv, env) -> None:
+def _start(session, argv, env, detach) -> None:
     transport = session.transport
     profile = transport.profile
     source = None
@@ -371,7 +373,7 @@ def _start(session, argv, env) -> None:
         **env,
     }
     encoded = {k: base64.b64encode(v.encode()).decode() for k, v in env.items()}
-    session.create(chef_command(session, venv, argv, env), encoded, launcher)
+    session.create(chef_command(session, venv, argv, env, detach), encoded, launcher)
 
 
 def chef_log(session) -> Optional[str]:
@@ -449,7 +451,7 @@ def run_remotely(
                 _say(f"previous run of {profile.name} {ended(status.exit_code)}")
                 session.kill()
             # Only here: a live chef must not be synced under.
-            _start(session, argv, env)
+            _start(session, argv, env, detach)
         if detach:
             _say(_reattach_hint(session))
             return 0
