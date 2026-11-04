@@ -17,6 +17,7 @@ from urllib3.util.retry import Retry
 
 from .exceptions import FileNotFoundException
 from .utils.request_utils import DomainAuthSession
+from .utils.request_utils import IdleConnectionAdapter
 
 UPDATE = False
 VIDEO_HEIGHT = None
@@ -203,8 +204,14 @@ STORAGE_DIRECTORY = os.getenv(
     "RICECOOKER_STORAGE", os.path.join(CURRENT_CWD, "storage")
 )
 
+# Studio's front end silently drops connections idle for about 5-10 minutes (#883).
+STUDIO_CONNECTION_MAX_IDLE = 60
+
 # Session for communicating to Kolibri Studio
 SESSION = requests.Session()
+_studio_adapter = IdleConnectionAdapter(max_idle=STUDIO_CONNECTION_MAX_IDLE)
+SESSION.mount("http://", _studio_adapter)
+SESSION.mount("https://", _studio_adapter)
 
 # Cache for filenames
 FILECACHE_DIRECTORY = os.getenv(
