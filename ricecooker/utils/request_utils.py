@@ -1,7 +1,10 @@
 import os
+import threading
+import time
 from urllib.parse import urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
 from requests.auth import AuthBase
 
 
@@ -79,3 +82,23 @@ class DomainAuthSession(requests.Session):
         auth = getattr(response.request, "domain_auth", None)
         if auth is not None:
             auth.rebuild(prepared_request, response.request)
+
+
+class IdleConnectionAdapter(HTTPAdapter):
+    def __init__(self, max_idle, **kwargs):
+        self.max_idle = max_idle
+        self._lock = threading.Lock()
+        self._last_used = {}
+        super().__init__(**kwargs)
+
+    def send(self, request, **kwargs):
+        host = urlparse(request.url).netloc
+        with self._lock:
+            now = time.monotonic()
+            if now - self._last_used.get(host, now) > self.max_idle:
+                self.close()
+            self._last_used[host] = now
+        try:
+            return super().send(request, **kwargs)
+        finally:
+            self._last_used[host] = time.monotonic()

@@ -14,6 +14,7 @@ from mock import MagicMock
 from mock import mock_open
 from mock import patch
 from requests import PreparedRequest
+from requests.adapters import HTTPAdapter
 from vcr_config import my_vcr
 
 from ricecooker import chefs
@@ -24,6 +25,7 @@ from ricecooker.utils import metadata_provider
 from ricecooker.utils.pipeline.exceptions import ExpectedFileException
 from ricecooker.utils.pipeline.transfer import DownloadStageHandler
 from ricecooker.utils.request_utils import DomainSpecificAuth
+from ricecooker.utils.request_utils import IdleConnectionAdapter
 
 settings = {"thumbnails": True, "compress": True}
 
@@ -316,6 +318,27 @@ def test_session_domain_auth_not_applied_to_request_with_own_auth(monkeypatch, h
     ).raise_for_status()
 
     assert a.seen["/end"]["X-Api-Key"] is None
+
+
+def test_idle_connection_adapter_measures_idle_time_per_host(monkeypatch):
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(
+        "ricecooker.utils.request_utils.time", MagicMock(monotonic=clock)
+    )
+    adapter = IdleConnectionAdapter(max_idle=5)
+    monkeypatch.setattr(adapter, "close", MagicMock())
+
+    def slow_storage_send(self, request, **kwargs):
+        if "storage" in request.url:
+            clock.return_value += 10
+
+    monkeypatch.setattr(HTTPAdapter, "send", slow_storage_send)
+
+    adapter.send(requests.Request("POST", "https://studio.test/api").prepare())
+    adapter.send(requests.Request("PUT", "https://storage.test/file").prepare())
+    adapter.close.assert_not_called()
+    adapter.send(requests.Request("POST", "https://studio.test/api").prepare())
+    adapter.close.assert_called_once()
 
 
 @pytest.fixture
