@@ -2,6 +2,7 @@ import os
 from urllib.parse import urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
 from requests.auth import AuthBase
 
 
@@ -79,3 +80,12 @@ class DomainAuthSession(requests.Session):
         auth = getattr(response.request, "domain_auth", None)
         if auth is not None:
             auth.rebuild(prepared_request, response.request)
+
+
+class IdleConnectionAdapter(HTTPAdapter):
+    def __init__(self, max_idle, **kwargs):
+        self.max_idle = max_idle
+        super().__init__(**kwargs)
+
+    def send(self, request, **kwargs):
+        return super().send(request, **kwargs)
