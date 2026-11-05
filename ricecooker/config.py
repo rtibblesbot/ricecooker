@@ -207,8 +207,6 @@ STORAGE_DIRECTORY = os.getenv(
 # Session for communicating to Kolibri Studio
 SESSION = requests.Session()
 # Studio's front end silently drops connections idle for about 5-10 minutes (#883).
-SESSION.mount("http://", ReconnectingAdapter())
-SESSION.mount("https://", ReconnectingAdapter())
 
 # Cache for filenames
 FILECACHE_DIRECTORY = os.getenv(
