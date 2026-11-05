@@ -6,6 +6,7 @@ on:
       - main
   pull_request:
     branches:
+      - verify-883-base
       - develop
       - main
 concurrency:
