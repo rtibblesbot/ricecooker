@@ -1,8 +1,11 @@
 import os
+from http.client import RemoteDisconnected
 from urllib.parse import urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
 from requests.auth import AuthBase
+from urllib3.exceptions import ProtocolError
 
 
 class DomainSpecificAuth(AuthBase):
@@ -79,3 +82,28 @@ class DomainAuthSession(requests.Session):
         auth = getattr(response.request, "domain_auth", None)
         if auth is not None:
             auth.rebuild(prepared_request, response.request)
+
+
+def _is_remote_disconnect(error):
+    reason = error.args[0] if error.args else None
+    return isinstance(reason, ProtocolError) and any(
+        isinstance(arg, RemoteDisconnected) for arg in reason.args
+    )
+
+
+class ReconnectingAdapter(HTTPAdapter):
+    def send(self, request, **kwargs):
+        body = request.body
+        body_start = body.tell() if hasattr(body, "seek") else None
+        resendable = (
+            body is None or isinstance(body, (bytes, str)) or body_start is not None
+        )
+        for _ in range(self._pool_maxsize):
+            try:
+                return super().send(request, **kwargs)
+            except requests.ConnectionError as e:
+                if not resendable or not _is_remote_disconnect(e):
+                    raise
+                if body_start is not None:
+                    body.seek(body_start)
+        return super().send(request, **kwargs)
